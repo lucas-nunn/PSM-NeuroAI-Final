@@ -8,12 +8,16 @@
 
 ## I am cool
 
+**clone the repo**
+
+- `git clone git@github.com:lucas-nunn/PSM-NeuroAI-Final.git"`
+
 **make a data and results folder**
 
 - `mkdir data results`
 - store data in `../data`
 - store results in `../results`
-- don't push them to github
+- don't push them ^^ to github
 - put figures in `../figures`
 - put OG source code in `../src/psm_final`
 - put analysis notebooks in `../notebooks`
@@ -24,8 +28,8 @@
 
 **install some VS Code extensions**
 
-- python
-- jupyter
+- [python](https://marketplace.visualstudio.com/items?itemName=ms-python.python)
+- [jupyter](https://marketplace.visualstudio.com/items?itemName=ms-toolsai.jupyter)
 
 **install uv**
 
@@ -33,7 +37,7 @@
 
 **install dependencies**
 
-- `uv sync`
+- `uv sync --all-extras`
 
 **activate the environment**
 
@@ -61,10 +65,10 @@
 
 ```
 # replace YOUR_BRANCH with the name of your branch
-!pip install uv
-!uv pip install --system https://github.com/lucas-nunn/PSM-NeuroAI-Final.git@YOUR_BRANCH
+!pip install git+https://github.com/lucas-nunn/PSM-NeuroAI-Final.git@infra
 ```
 
+- your new changes must be on Github, so you have to push your branch (see below)
 - somehow get your data into google drive
 
 # CONTRIBUTING
