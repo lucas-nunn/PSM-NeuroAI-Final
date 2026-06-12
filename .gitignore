@@ -1,0 +1,26 @@
+# uv
+.venv/
+
+# build
+dist/
+*.egg-info/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# jupyter
+.ipynb_checkpoints/
+
+# data / outputs
+data/
+results/
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# env
+.env
