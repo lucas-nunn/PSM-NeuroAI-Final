@@ -1,3 +1,5 @@
+**RULE 1: NO SLOP ALLOWED**
+
 # SETUP
 
 **choose your path:**
@@ -10,14 +12,14 @@
 
 **clone the repo**
 
-- `git clone git@github.com:lucas-nunn/PSM-NeuroAI-Final.git"`
+- `git clone git@github.com:lucas-nunn/PSM-NeuroAI-Final.git`
 
 **make a data and results folder**
 
 - `mkdir data results`
-- store data in `../data`
-- store results in `../results`
-- don't push them ^^ to github
+- store data in `../data` or somewhere NOT in the repo
+- store results in `../results` or somewhere NOT in the repo
+- don't push them ^^ to github (`../data` and `../results` are by git {`./.gitignore`})
 - put figures in `../figures`
 - put OG source code in `../src/psm_final`
 - put analysis notebooks in `../notebooks`
@@ -43,11 +45,15 @@
 
 - `source .venv/bin/activate`
 
-**create a jupyter notebook in ../notebooks**
+**test out running the notebooks in `../reference`**
 
-- open it
+- open one
 - top right corner "select kernel"
 - find "psm-final"
+
+**create an analysis jupyter notebook in ../notebooks**
+
+- have fun 0_0
 
 ## I am cool but I don't want to stress my precious CPU
 
@@ -65,7 +71,7 @@
 
 ```
 # replace YOUR_BRANCH with the name of your branch
-!pip install git+https://github.com/lucas-nunn/PSM-NeuroAI-Final.git@infra
+!pip install git+https://github.com/lucas-nunn/PSM-NeuroAI-Final.git@YOUR_BRANCH
 ```
 
 - your new changes must be on Github, so you have to push your branch (see below)
