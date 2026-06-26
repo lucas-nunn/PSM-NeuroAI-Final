@@ -5,6 +5,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "matplotlib>=3.7",
+    "nsd-visuo-semantics",
     "numpy>=1.26,<3",
     "scikit-learn>=1.3",
     "scipy>=1.11",
@@ -16,6 +17,7 @@ dependencies = [
 notebook = [
     "ipykernel>=6.29",
     "jupyter>=1.1.1",
+    "python-dotenv>=1.0",
 ]
 neuro = [
     "nilearn>=0.10",
@@ -31,3 +33,29 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/psm_final"]
+
+# --- nsd-visuo-semantics (visuo_llm_ram_rescue) support -----------------------
+# uv only honors tool.uv.* settings for the root project, never from a
+# dependency, so the fork's own overrides don't propagate. We replicate the
+# parts it needs here:
+#   - nsdcode's published PyPI metadata pins scikit-learn==0.23.2 / nibabel==3.1.0
+#     (conflicts with our scikit-learn>=1.3); restate its real runtime deps.
+#   - nsd-access is not on PyPI; pull it from git.
+#   - torch 2.11 cu129 builds live only on the PyTorch index, not PyPI.
+[[tool.uv.dependency-metadata]]
+name = "nsdcode"
+version = "1.1.dev260054000"
+requires-python = ">=3.6"
+requires-dist = ["nibabel", "numpy", "scipy", "tqdm"]
+
+[tool.uv.sources]
+nsd-access = { git = "https://github.com/tknapen/nsd_access.git" }
+torch = [{ index = "pytorch-cuda", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }]
+torchvision = [{ index = "pytorch-cuda", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }]
+torchaudio = [{ index = "pytorch-cuda", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }]
+nsd-visuo-semantics = { git = "https://github.com/lucas-nunn/visuo_llm_ram_rescue.git" }
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
