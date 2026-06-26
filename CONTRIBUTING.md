@@ -41,9 +41,19 @@
 
 - `uv sync --all-extras`
 
+**set local environment variables**
+
+- `cp .env.example .env`
+- edit `.env` and set `NSD_DATA_PATH` / `FREESURFER_HOME`
+
 **activate the environment**
 
 - `source .venv/bin/activate`
+- or run tools directly in the project env with `uv run ...` (recommended)
+
+**start jupyter from the project env**
+
+- `uv run jupyter lab`
 
 **test out running the notebooks in `../reference`**
 

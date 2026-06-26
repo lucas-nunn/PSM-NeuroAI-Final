@@ -17,6 +17,7 @@ dependencies = [
 notebook = [
     "ipykernel>=6.29",
     "jupyter>=1.1.1",
+    "python-dotenv>=1.0",
 ]
 neuro = [
     "nilearn>=0.10",
