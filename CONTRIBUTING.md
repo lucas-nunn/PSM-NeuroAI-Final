@@ -65,11 +65,11 @@
 
 ```
 # replace YOUR_BRANCH with the name of your branch
-!pip install git+https://github.com/lucas-nunn/PSM-NeuroAI-Final.git@infra
+!pip install git+https://github.com/lucas-nunn/PSM-NeuroAI-Final.git@YOUR_BRANCH
 ```
 
 - your new changes must be on Github, so you have to push your branch (see below)
-- somehow get your data into google drive
+- take a look at [data_exploration.ipynb](../notebooks/data_exploration.ipynb)
 
 # CONTRIBUTING
 

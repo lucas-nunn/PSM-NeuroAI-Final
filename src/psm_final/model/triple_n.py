@@ -65,6 +65,28 @@ class TripleN(Model):
         self.responses = np.vstack(resp_blocks)                  # (n_units, 1072) z-scored responses
         self.units = pd.concat(meta_blocks, ignore_index=True)   # one row per unit, row-aligned with responses
 
+    @staticmethod
+    def nsd_to_stim_index(nsd_ids, crosswalk=None, drop_missing=False):
+        """Map NSD 73k ids (1-based) to Triple-N ``stim_index`` values (1-based, 1..1000).
+
+        Inverts the crosswalk's ``nsd_id_73k`` column. Only the 1000 NSD-Shared scenes
+        carry an NSD id; localizers (``stim_index`` 1001..1072) and any 73k id outside
+        the shared-1000 set have no mapping -> ``None`` (input order preserved), unless
+        ``drop_missing=True``. The returned list is exactly the ``indices`` argument
+        expected by :meth:`compute_rdm`.
+
+        ``crosswalk``: optional already-loaded crosswalk DataFrame; defaults to
+        :func:`psm_final.helpers.stimulus.load_crosswalk`.
+        """
+        from psm_final.helpers.stimulus import load_crosswalk
+
+        if crosswalk is None:
+            crosswalk = load_crosswalk()
+        scenes = crosswalk[crosswalk["kind"] == "scene"]
+        mapping = dict(zip(scenes["nsd_id_73k"].astype(int), scenes["stim_index"].astype(int)))
+        stim = [mapping.get(int(i)) for i in np.asarray(nsd_ids).reshape(-1)]
+        return [s for s in stim if s is not None] if drop_missing else stim
+
     def compute_rdm(self, macaque=None, area=None, category=None,
                     region=None, preference=None, indices=None, **filters):
         """Stimulus x stimulus correlation-distance RDM over a selected set of units.

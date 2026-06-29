@@ -44,7 +44,7 @@ class Algonauts(Model):
                 train_rows.append(row)
         return matched_nsd, train_rows
 
-    def roi_mask(self, roi):
+    def roi_mask(self, roi, subject):
         if roi in ["V1v", "V1d", "V2v", "V2d", "V3v", "V3d", "hV4"]:
             roi_class = 'prf-visualrois'
         elif roi in ["EBA", "FBA-1", "FBA-2", "mTL-bodies"]:
@@ -58,27 +58,29 @@ class Algonauts(Model):
         elif roi in ["early", "midventral", "midlateral", "midparietal", "ventral", "lateral", "parietal"]:
             roi_class = 'streams'
 
-        # Load the ROI brain surface maps
-        roi_class_dir_lh = os.path.join(self.algonauts_dir, 'roi_masks',
-            'lh.'+roi_class+'_fsaverage_space.npy')
-        roi_class_dir_rh = os.path.join(self.algonauts_dir, 'roi_masks',
-            'rh.'+roi_class+'_fsaverage_space.npy')
-        roi_map_dir = os.path.join(self.algonauts_dir, 'roi_masks',
-            'mapping_'+roi_class+'.npy')
-        fsaverage_roi_class_lh = np.load(roi_class_dir_lh)
-        fsaverage_roi_class_rh = np.load(roi_class_dir_rh)
+        # Load the ROI maps in *challenge space*: these align 1-to-1 with the columns of
+        # ``*_training_fmri.npy`` so they can index the fMRI arrays directly. (The
+        # ``*_fsaverage_space.npy`` maps are the full ~164k-vertex surface, for plotting.)
+        # Challenge space is subject-specific (each subject has a different vertex count),
+        # so the masks live under that subject's ``roi_masks`` directory.
+        roi_masks_dir = os.path.join(self.algonauts_dir, f'subj0{subject}', 'roi_masks')
+        roi_class_dir_lh = os.path.join(roi_masks_dir, 'lh.'+roi_class+'_challenge_space.npy')
+        roi_class_dir_rh = os.path.join(roi_masks_dir, 'rh.'+roi_class+'_challenge_space.npy')
+        roi_map_dir = os.path.join(roi_masks_dir, 'mapping_'+roi_class+'.npy')
+        challenge_roi_class_lh = np.load(roi_class_dir_lh)
+        challenge_roi_class_rh = np.load(roi_class_dir_rh)
         roi_map = np.load(roi_map_dir, allow_pickle=True).item()
 
-        # Select the vertices corresponding to the ROI of interest
+        # Boolean mask of the vertices belonging to the ROI of interest, per hemisphere.
         roi_mapping = list(roi_map.keys())[list(roi_map.values()).index(roi)]
-        fsaverage_roi_lh = np.asarray(fsaverage_roi_class_lh == roi_mapping, dtype=int)
-        fsaverage_roi_rh = np.asarray(fsaverage_roi_class_rh == roi_mapping, dtype=int)
+        lh_roi = challenge_roi_class_lh == roi_mapping
+        rh_roi = challenge_roi_class_rh == roi_mapping
 
-        return fsaverage_roi_lh, fsaverage_roi_rh
+        return lh_roi, rh_roi
 
-    def compute_rdm(self, subject, indices=None, roi_mask=None):
+    def compute_rdm(self, subject, indices=None, roi=None):
         if indices is None:
-            indices = self.nsd_indices        
+            indices = self.nsd_indices
 
         _, train_rows = self.shared_stimuli_indices(subject, indices)
 
@@ -87,9 +89,16 @@ class Algonauts(Model):
 
         lh_shared = lh[train_rows]
         rh_shared = rh[train_rows]
+
+        # Restrict to an ROI's vertices (challenge-space masks index the fMRI columns).
+        if roi is not None:
+            lh_roi, rh_roi = self.roi_mask(roi, subject)
+            lh_shared = lh_shared[:, lh_roi]
+            rh_shared = rh_shared[:, rh_roi]
+
         shared = np.concat((lh_shared, rh_shared), axis=1)
 
-        dist = pdist(shared, 'correlation')
+        dist = Model.correlation_rdm(shared, condensed=True)
 
         return dist
  
