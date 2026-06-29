@@ -26,8 +26,8 @@ __all__ = [
 ]
 
 _EXPORTS = {
-    "Algonauts": ".data.algonauts",
-    "TripleN": ".data.triple_n",
+    "Algonauts": ".dataset.algonauts",
+    "TripleN": ".dataset.triple_n",
     "SimpleMLP": ".helpers.MLP",
     "MLP_3layers": ".helpers.MLP",
     "fit_pca": ".helpers.pca",
@@ -40,11 +40,11 @@ _EXPORTS = {
     "train": ".helpers.training_testing",
     "test": ".helpers.training_testing",
     "train_and_test": ".helpers.training_testing",
-    "shared_stimuli": ".data.util",
-    "session_macaque": ".data.stimulus",
-    "build_crosswalk": ".data.stimulus",
-    "load_crosswalk": ".data.stimulus",
-    "map_trials": ".data.stimulus",
+    "shared_stimuli": ".dataset.util",
+    "session_macaque": ".dataset.stimulus",
+    "build_crosswalk": ".dataset.stimulus",
+    "load_crosswalk": ".dataset.stimulus",
+    "map_trials": ".dataset.stimulus",
     "noise_ceiling": ".analysis.correlating",
     "correlation_rdm": ".analysis.correlating",
 }
