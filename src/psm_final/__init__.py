@@ -3,6 +3,9 @@
 from importlib import import_module
 
 __all__ = [
+    "Model",
+    "Algonauts",
+    "TripleN",
     "SimpleMLP",
     "MLP_3layers",
     "fit_pca",
@@ -15,9 +18,16 @@ __all__ = [
     "train",
     "test",
     "train_and_test",
+    "session_macaque",
+    "build_crosswalk",
+    "load_crosswalk",
+    "map_trials",
 ]
 
 _EXPORTS = {
+    "Model": ".model.base",
+    "Algonauts": ".model.algonauts",
+    "TripleN": ".model.triple_n",
     "SimpleMLP": ".helpers.MLP",
     "MLP_3layers": ".helpers.MLP",
     "fit_pca": ".helpers.pca",
@@ -30,6 +40,10 @@ _EXPORTS = {
     "train": ".helpers.training_testing",
     "test": ".helpers.training_testing",
     "train_and_test": ".helpers.training_testing",
+    "session_macaque": ".helpers.stimulus",
+    "build_crosswalk": ".helpers.stimulus",
+    "load_crosswalk": ".helpers.stimulus",
+    "map_trials": ".helpers.stimulus",
 }
 
 

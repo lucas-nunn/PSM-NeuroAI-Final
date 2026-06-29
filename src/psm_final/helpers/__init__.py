@@ -15,6 +15,10 @@ __all__ = [
     "train",
     "test",
     "train_and_test",
+    "session_macaque",
+    "build_crosswalk",
+    "load_crosswalk",
+    "map_trials",
 ]
 
 _EXPORTS = {
@@ -30,6 +34,10 @@ _EXPORTS = {
     "train": ".training_testing",
     "test": ".training_testing",
     "train_and_test": ".training_testing",
+    "session_macaque": ".stimulus",
+    "build_crosswalk": ".stimulus",
+    "load_crosswalk": ".stimulus",
+    "map_trials": ".stimulus",
 }
 
 
