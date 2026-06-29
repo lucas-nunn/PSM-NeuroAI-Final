@@ -3,15 +3,13 @@
 from importlib import import_module
 
 __all__ = [
-    "Model",
-    "Algonauts",
-    "TripleN",
+    "noise_ceiling",
+    "correlation_rdm",
 ]
 
 _EXPORTS = {
-    "Model": ".base",
-    "Algonauts": ".algonauts",
-    "TripleN": ".triple_n",
+    "noise_ceiling": ".correlating",
+    "correlation_rdm": ".correlating",
 }
 
 
@@ -23,3 +21,4 @@ def __getattr__(name):
     value = getattr(module, name)
     globals()[name] = value
     return value
+
