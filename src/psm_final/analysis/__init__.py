@@ -1,4 +1,4 @@
-"""Public exports for the psm_final.model subpackage."""
+"""Public exports for the psm_final.analysis subpackage."""
 
 from importlib import import_module
 
