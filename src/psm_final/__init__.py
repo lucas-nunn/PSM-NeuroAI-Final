@@ -17,6 +17,7 @@ __all__ = [
     "train",
     "test",
     "train_and_test",
+    "shared_stimuli",
     "session_macaque",
     "build_crosswalk",
     "load_crosswalk",

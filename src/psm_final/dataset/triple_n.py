@@ -77,7 +77,7 @@ class TripleN():
         ``crosswalk``: optional already-loaded crosswalk DataFrame; defaults to
         :func:`psm_final.helpers.stimulus.load_crosswalk`.
         """
-        from psm_final.data.stimulus import load_crosswalk
+        from psm_final.dataset.stimulus import load_crosswalk
 
         if crosswalk is None:
             crosswalk = load_crosswalk()
