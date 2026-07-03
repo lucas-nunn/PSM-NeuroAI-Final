@@ -3,9 +3,11 @@ import numpy as np
 from scipy.stats import spearmanr
 
 def noise_ceiling(rdms: np.ndarray):
-    group_mean = rdms.mean(axis=0)
+    rdms = np.asarray(rdms)
     n = rdms.shape[0]
-
+    if n < 2:
+        raise ValueError("need at least 2 RDMs to compute a noise ceiling")
+    group_mean = rdms.mean(axis=0)
     uppers, lowers = [], []
     for i in range(n):
         loo_mean = (rdms.sum(axis=0) - rdms[i]) / (n - 1)   # mean of the other subjects
