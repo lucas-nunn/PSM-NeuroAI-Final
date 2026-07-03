@@ -3,6 +3,8 @@
 from importlib import import_module
 
 __all__ = [
+    "Algonauts",
+    "TripleN",
     "SimpleMLP",
     "MLP_3layers",
     "fit_pca",
@@ -15,9 +17,18 @@ __all__ = [
     "train",
     "test",
     "train_and_test",
+    "shared_stimuli",
+    "session_macaque",
+    "build_crosswalk",
+    "load_crosswalk",
+    "map_trials",
+    "noise_ceiling",
+    "correlation_rdm",
 ]
 
 _EXPORTS = {
+    "Algonauts": ".dataset.algonauts",
+    "TripleN": ".dataset.triple_n",
     "SimpleMLP": ".helpers.MLP",
     "MLP_3layers": ".helpers.MLP",
     "fit_pca": ".helpers.pca",
@@ -30,6 +41,13 @@ _EXPORTS = {
     "train": ".helpers.training_testing",
     "test": ".helpers.training_testing",
     "train_and_test": ".helpers.training_testing",
+    "shared_stimuli": ".dataset.util",
+    "session_macaque": ".dataset.stimulus",
+    "build_crosswalk": ".dataset.stimulus",
+    "load_crosswalk": ".dataset.stimulus",
+    "map_trials": ".dataset.stimulus",
+    "noise_ceiling": ".analysis.correlating",
+    "correlation_rdm": ".analysis.correlating",
 }
 
 
