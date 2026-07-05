@@ -1,19 +1,15 @@
-"""Public exports for the psm_final.analysis subpackage."""
+"""Public exports for the psm_final.models subpackage."""
 
 from importlib import import_module
 
 __all__ = [
-    "noise_ceiling",
-    "correlation_rdm",
-    "ModelAnalysisBase",
-    "BetaVAEAnalysis",
+    "BetaVAE",
+    "COCODataset",
 ]
 
 _EXPORTS = {
-    "noise_ceiling": ".correlating",
-    "correlation_rdm": ".correlating",
-    "ModelAnalysisBase": ".model",
-    "BetaVAEAnalysis": ".beta_vae_analysis",
+    "BetaVAE": ".beta_vae",
+    "COCODataset": ".beta_vae",
 }
 
 
@@ -25,4 +21,3 @@ def __getattr__(name):
     value = getattr(module, name)
     globals()[name] = value
     return value
-
