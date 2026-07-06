@@ -19,10 +19,14 @@ class ModelAnalysisBase():
         self.shared_stimuli_dir = Path(f'{self.triple_n_path}/others/StimuliNNN')
         digit_only = re.compile(r"^\d+$")
 
-        self.images = [
-            p for p in self.shared_stimuli_dir.glob("*.bmp")
-            if digit_only.fullmatch(p.stem)
-        ]
+        # Sort by the numeric filename so images[i] is deterministically the
+        # stimulus at position i+1 (StimuliNNN/0001.bmp..1000.bmp); glob order is
+        # filesystem-dependent, which would otherwise misalign indices=... RDMs.
+        self.images = sorted(
+            (p for p in self.shared_stimuli_dir.glob("*.bmp")
+             if digit_only.fullmatch(p.stem)),
+            key=lambda p: int(p.stem),
+        )
 
         if indices is not None:
             self.images = [self.images[i] for i in indices]
