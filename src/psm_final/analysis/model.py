@@ -16,7 +16,7 @@ class ModelAnalysisBase():
         raise NotImplementedError("This method should be implemented in subclasses.")
 
     def rdm(self, indices=None):
-        self.shared_stimuli_dir = Path(f'{self.triple_n_path}/others/StimuliNNN')
+        self.shared_stimuli_dir = Path(self.triple_n_path) / "others" / "StimuliNNN"
         digit_only = re.compile(r"^\d+$")
 
         # Sort by the numeric filename so images[i] is deterministically the
