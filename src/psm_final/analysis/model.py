@@ -31,7 +31,11 @@ class ModelAnalysisBase():
         if indices is not None:
             self.images = [self.images[i] for i in indices]
 
-        embeddings = np.stack([self.embedding(Image.open(img_path)) for img_path in self.images], axis=0)
+        embeddings = []
+        for img_path in self.images:
+            with Image.open(img_path) as img:
+                embeddings.append(self.embedding(img))
+        embeddings = np.stack(embeddings, axis=0)
         return correlation_rdm(embeddings)
 
     def rsa_algonauts(self):
