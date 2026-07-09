@@ -24,6 +24,10 @@ __all__ = [
     "map_trials",
     "noise_ceiling",
     "correlation_rdm",
+    "BetaVAE",
+    "COCODataset",
+    "ModelAnalysisBase",
+    "BetaVAEAnalysis",
 ]
 
 _EXPORTS = {
@@ -48,6 +52,10 @@ _EXPORTS = {
     "map_trials": ".dataset.stimulus",
     "noise_ceiling": ".analysis.correlating",
     "correlation_rdm": ".analysis.correlating",
+    "BetaVAE": ".models.beta_vae",
+    "COCODataset": ".models.beta_vae",
+    "ModelAnalysisBase": ".analysis.model",
+    "BetaVAEAnalysis": ".analysis.beta_vae_analysis",
 }
 
 
