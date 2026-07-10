@@ -1,0 +1,234 @@
+"""
+cnn_basemodel.py
+
+Self-contained CNN classifier for COCO images -- model, dataset, and CLI
+all in one file, matching beta_vae.py's pattern (no separate dataset module).
+
+Requires COCO's annotation file (not just the image zips) -- download
+annotations_trainval2017.zip from https://cocodataset.org/#download,
+unzip it, and point --annotation_path at annotations/instances_train2017.json.
+Parsed with Python's built-in json module -- no extra annotation library needed.
+"""
+
+import argparse
+import json
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+from PIL import Image
+from torch.utils.data import Dataset, DataLoader, random_split
+from torchvision import transforms
+
+from psm_final.models.beta_vae import _image_transform
+from psm_final.helpers.training_testing import train, test, train_and_test  
+
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+
+class SimpleCNN(nn.Module):
+    def __init__(self, num_classes=10):
+        super(SimpleCNN, self).__init__()
+
+        # First convolutional layer:
+        # Input: 3 channels (RGB), Output: 32 feature maps
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=3)
+
+        # Second convolutional layer:
+        # Input: 32 feature maps, Output: 64 feature maps
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3)
+
+        # Third convolutional layer:
+        # Input: 64 feature maps, Output: 128 feature maps
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3)
+
+        # Max pooling layer: reduces spatial size by a factor of 2
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # Activation function
+        self.relu = nn.ReLU()
+
+        # Adaptive average pooling: reduces each feature map to size 1x1
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
+
+        # Fully connected layers
+        self.fc1 = nn.Linear(128 * 1 * 1, 256)
+        # num_classes is set dynamically to match however many categories
+        # exist in the annotation file -- see main().
+        self.fc2 = nn.Linear(256, num_classes)
+
+    def forward(self, x):
+        x = self.relu(self.conv1(x))
+        x = self.pool(x)
+
+        x = self.relu(self.conv2(x))
+        x = self.pool(x)
+
+        x = self.relu(self.conv3(x))
+
+        x = self.adaptive_pool(x)
+        x = x.view(x.size(0), -1)
+
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+
+        return x
+
+# SimpleCNN doesn't force a resolution (AdaptiveAvgPool2d handles that), but
+# keep this consistent with beta_vae.py unless you have a reason to change it.
+IMAGE_SIZE = 32
+
+
+def build_coco_classification_cache(annotation_path, image_dir, cache_path, image_size=IMAGE_SIZE):
+    """
+    Turn COCO's multi-object annotations into single-label classification data,
+    using every category found in the annotation file (no restriction/subset).
+
+    Each image's label is the category of its LARGEST (by bounding-box area)
+    annotated object -- a simple, deterministic way to collapse "multiple
+    objects per image" into "one label per image". Images with no annotations
+    at all are skipped.
+    """
+    image_dir = Path(image_dir)
+
+    # Loads the whole ~450MB file into memory once -- fine for a one-time
+    # cache-building pass, and the result feeds straight into the loop below.
+    with open(annotation_path, 'r') as f:
+        coco_data = json.load(f)
+
+    # "categories": [{"id": 1, "name": "person", "supercategory": "person"}, ...]
+    # Use every category present, ordered by id, so label indices are stable
+    # and predictable (index 0 = lowest category id, etc.).
+    ordered_categories = sorted(coco_data['categories'], key=lambda c: c['id'])
+    class_names = [cat['name'] for cat in ordered_categories]
+    cat_id_to_label = {cat['id']: i for i, cat in enumerate(ordered_categories)}
+
+    # "images": [{"id": 391895, "file_name": "000000391895.jpg", ...}, ...]
+    image_id_to_filename = {img['id']: img['file_name'] for img in coco_data['images']}
+
+    # "annotations": one entry per labeled OBJECT (many per image). Walk the
+    # list once, tracking the largest-area object seen per image so far.
+    best_area = {}
+    best_label = {}
+    for ann in coco_data['annotations']:
+        image_id = ann['image_id']
+        area = ann['area']
+        if image_id not in best_area or area > best_area[image_id]:
+            best_area[image_id] = area
+            best_label[image_id] = cat_id_to_label[ann['category_id']]
+
+    kept_image_ids = sorted(best_label.keys())
+    kept_labels = [best_label[image_id] for image_id in kept_image_ids]
+
+    if not kept_image_ids:
+        raise RuntimeError('no images have any annotations in this file')
+
+    print(f'{len(kept_image_ids)} images matched across {len(class_names)} categories '
+          f'(out of {len(coco_data["images"])} total in the annotation file)')
+
+    transform = _image_transform(image_size)
+    cache = torch.empty((len(kept_image_ids), 3, image_size, image_size), dtype=torch.uint8)
+    for i, image_id in enumerate(kept_image_ids):
+        file_name = image_id_to_filename[image_id]
+        with Image.open(image_dir / file_name) as image:
+            cache[i] = transform(image.convert('RGB'))
+        if (i + 1) % 5000 == 0:
+            print(f'  pre-transformed {i + 1}/{len(kept_image_ids)} images')
+
+    labels = torch.tensor(kept_labels, dtype=torch.long)
+
+    cache_path = Path(cache_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({'images': cache, 'labels': labels, 'classes': class_names}, cache_path)
+    size_gb = cache.element_size() * cache.nelement() / 1e9
+    print(f'wrote image cache {cache_path} (shape {tuple(cache.shape)}, {size_gb:.2f} GB)')
+    return cache, labels, class_names
+
+
+class COCOClassificationDataset(Dataset):
+    """Single-label COCO images, using every category in the annotation file,
+    cached as a uint8 tensor for fast repeated epochs.
+
+    Same load-cache-or-build-it pattern as beta_vae.py's COCODataset, but
+    returns (image, label) pairs instead of just images. Delete the cache
+    file if the image set or image_size changes.
+    """
+    def __init__(self, annotation_path, image_dir, cache_dir='./cache', image_size=IMAGE_SIZE):
+        cache_path = Path(cache_dir) / f'{Path(image_dir).name}_{image_size}px_allcls.pt'
+        if cache_path.exists():
+            print(f'loading cached images from {cache_path}')
+            data = torch.load(cache_path)
+            self.images, self.labels, self.classes = data['images'], data['labels'], data['classes']
+        else:
+            print(f'no cache at {cache_path}; building from COCO annotations...')
+            self.images, self.labels, self.classes = build_coco_classification_cache(
+                annotation_path, image_dir, cache_path, image_size,
+            )
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        # uint8 [0, 255] -> float [0, 1]
+        image = self.images[idx].float().div_(255.0)
+        label = self.labels[idx]
+        return image, label
+
+
+def build_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--coco_root', type=str, required=True,
+                         help='Path to train2017/ folder of images')
+    parser.add_argument('--annotation_path', type=str, required=True,
+                         help='Path to instances_train2017.json')
+    parser.add_argument('--cache_dir', type=str, default='./cache',
+                         help='Directory for the pre-transformed image tensor cache')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training')
+    parser.add_argument('--num_epochs', type=int, default=50, help='Number of epochs to train for')
+    parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate for the optimizer')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+    parser.add_argument('--num_workers', type=int, default=2, help='DataLoader worker processes')
+    return parser
+
+def parse_args():
+    return build_parser().parse_args()
+
+def main():
+    args = parse_args()
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+    coco_train = COCOClassificationDataset(
+        annotation_path=args.annotation_path,
+        image_dir=args.coco_root,
+        cache_dir=args.cache_dir,
+    )
+
+    coco_dataloader_train = DataLoader(
+        coco_train,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+    )
+
+    # create an instance of the model 
+    cnn = SimpleCNN(num_classes=len(coco_train.classes))
+
+    # Move the model to the desired device
+    cnn = cnn.to(device)
+
+    #Criterion and optimizer
+    cnn_criterion = nn.CrossEntropyLoss()  # Standardly used for classification
+    cnn_optimizer = torch.optim.Adam(cnn.parameters(), lr=args.learning_rate)
+    
+    train(cnn, coco_dataloader_train, 1, cnn_criterion, cnn_optimizer, device)
+    
+    out_dir = Path('./results/cnn_basemodel')
+    out_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(cnn.state_dict(), out_dir / 'cnn.pth')
+    print(f'saved model to {out_dir / "cnn.pth"}')
+
+if __name__ == '__main__':
+    main()
