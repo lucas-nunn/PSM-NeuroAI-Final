@@ -17,6 +17,23 @@ class ModelAnalysisBase():
     def embedding(self, image):
         raise NotImplementedError("This method should be implemented in subclasses.")
 
+    @classmethod
+    def discover(cls, *, triple_n_path, checkpoints_root, device=None):
+        """Enumerate ready-to-run instances of this analyzer for the RSA runner.
+
+        Returns a list of ``(label, factory)`` pairs, where ``factory()`` builds one
+        configured analyzer instance (typically one per trained checkpoint found
+        under ``checkpoints_root``). Construction is deferred into ``factory`` so
+        discovery stays cheap and the runner loads at most one model into memory at
+        a time.
+
+        The base returns ``[]`` -- a subclass opts in by locating its own
+        checkpoints (see :meth:`BetaVAEAnalysis.discover` for the worked example).
+        The runner (`psm_final.analysis.runner`) calls this on every concrete
+        subclass to collect the models to compare against the brain data.
+        """
+        return []
+
     def rdm(self, indices=None):
         self.shared_stimuli_dir = Path(self.triple_n_path) / "others" / "StimuliNNN"
         digit_only = re.compile(r"^\d+$")
