@@ -16,6 +16,9 @@ dependencies = [
     "xlrd>=2.0.2",
 ]
 
+[project.scripts]
+psm-rsa = "psm_final.analysis.runner:main"
+
 [project.optional-dependencies]
 notebook = [
     "ipykernel>=6.29",

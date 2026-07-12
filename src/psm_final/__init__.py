@@ -28,6 +28,7 @@ __all__ = [
     "COCODataset",
     "ModelAnalysisBase",
     "BetaVAEAnalysis",
+    "run_rsa",
 ]
 
 _EXPORTS = {
@@ -56,6 +57,7 @@ _EXPORTS = {
     "COCODataset": ".models.beta_vae",
     "ModelAnalysisBase": ".analysis.model",
     "BetaVAEAnalysis": ".analysis.beta_vae_analysis",
+    "run_rsa": ".analysis.runner",
 }
 
 
