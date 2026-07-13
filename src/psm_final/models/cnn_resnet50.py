@@ -43,6 +43,8 @@ def main():
         annotation_path=args.annotation_path,
         image_dir=args.coco_root,
         cache_dir=args.cache_dir,
+        image_size=args.image_size,
+        max_images=args.max_train_images or None,
     )
 
     coco_dataloader_train = DataLoader(
@@ -56,6 +58,7 @@ def main():
         annotation_path=args.val_annotation_path,
         image_dir=args.val_coco_root,
         cache_dir=args.cache_dir,
+        image_size=args.image_size,
     )
 
     coco_dataloader_test = DataLoader(

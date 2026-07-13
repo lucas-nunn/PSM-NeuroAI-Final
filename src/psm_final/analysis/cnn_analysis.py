@@ -36,16 +36,21 @@ class CNNAnalysis(ModelAnalysisBase):
         if 'model_state_dict' in checkpoint:
             state_dict = checkpoint['model_state_dict']
             num_classes = checkpoint.get('num_classes', state_dict['fc2.weight'].shape[0])
+            # Embed at the resolution the model was trained on (stored in the
+            # checkpoint). Falls back to IMAGE_SIZE for older checkpoints that
+            # predate this field, preserving their original 64px behaviour.
+            image_size = checkpoint.get('image_size', IMAGE_SIZE)
         else:
             state_dict = checkpoint
             num_classes = state_dict['fc2.weight'].shape[0]
+            image_size = IMAGE_SIZE
 
         self.model = SimpleCNN(num_classes=num_classes)
         self.model.load_state_dict(state_dict)
         self.model.to(self.device)
         self.model.eval()
 
-        self.transform = _image_transform(IMAGE_SIZE)
+        self.transform = _image_transform(image_size)
 
     def embedding(self, image):
         image_tensor = self.transform(image.convert('RGB')).float().div(255.0)

@@ -153,7 +153,8 @@ class COCOClassificationDataset(Dataset):
     returns (image, label) pairs instead of just images. Delete the cache
     file if the image set or image_size changes.
     """
-    def __init__(self, annotation_path, image_dir, cache_dir='./cache', image_size=IMAGE_SIZE):
+    def __init__(self, annotation_path, image_dir, cache_dir='./cache', image_size=IMAGE_SIZE,
+                 max_images=None):
         cache_path = Path(cache_dir) / f'{Path(image_dir).name}_{image_size}px_allcls.pt'
         if cache_path.exists():
             print(f'loading cached images from {cache_path}')
@@ -164,6 +165,18 @@ class COCOClassificationDataset(Dataset):
             self.images, self.labels, self.classes = build_coco_classification_cache(
                 annotation_path, image_dir, cache_path, image_size,
             )
+
+        # Optionally keep only a random subset to shrink the in-RAM footprint
+        # (the full 224px cache is ~12.5 GB and both train+val are resident at
+        # once). Fancy-indexing returns a fresh, smaller tensor, so reassigning
+        # here drops the reference to the full tensor and frees that memory.
+        # Deterministic (fixed seed) so the same subset is used across runs.
+        if max_images is not None and 0 < max_images < len(self.images):
+            n_total = len(self.images)
+            keep = torch.randperm(n_total, generator=torch.Generator().manual_seed(0))[:max_images]
+            self.images = self.images[keep].contiguous()
+            self.labels = self.labels[keep].contiguous()
+            print(f'subsampled to {len(self.images)} of {n_total} images (--max_train_images)')
 
     def __len__(self):
         return len(self.images)
@@ -187,11 +200,17 @@ def build_parser():
                         help='Path to instances_val2017.json')
     parser.add_argument('--cache_dir', type=str, default='./cache',
                          help='Directory for the pre-transformed image tensor cache')
+    parser.add_argument('--image_size', type=int, default=IMAGE_SIZE,
+                         help='Square resolution (px) images are resized to before training. '
+                              'Changing it builds a separate cache (the size is part of the cache filename).')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training')
     parser.add_argument('--num_epochs', type=int, default=25, help='Number of epochs to train for')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate for the optimizer')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--num_workers', type=int, default=2, help='DataLoader worker processes')
+    parser.add_argument('--max_train_images', type=int, default=0,
+                         help='If >0, randomly subsample the training set to this many images '
+                              '(deterministic). Shrinks the in-RAM cache; 0 = use all images.')
     parser.add_argument('--k_folds', type=int, default=5,
                      help='Number of CV folds to run on the training set before the final model')
     return parser
@@ -215,6 +234,8 @@ def main():
         annotation_path=args.annotation_path,
         image_dir=args.coco_root,
         cache_dir=args.cache_dir,
+        image_size=args.image_size,
+        max_images=args.max_train_images or None,
     )
 
     coco_dataloader_train = DataLoader(
@@ -228,6 +249,7 @@ def main():
         annotation_path=args.val_annotation_path,  
         image_dir=args.val_coco_root,             
         cache_dir=args.cache_dir,
+        image_size=args.image_size,
     )
         
     coco_dataloader_test = DataLoader(
@@ -298,6 +320,7 @@ def main():
         'model_state_dict': cnn.state_dict(),
         'classes': coco_train.classes,
         'num_classes': len(coco_train.classes),
+        'image_size': args.image_size,
     }, out_dir / 'cnn.pth')
     print(f'saved model to {out_dir / "cnn.pth"}')
     
