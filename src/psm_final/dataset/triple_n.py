@@ -48,6 +48,11 @@ class TripleN():
             selectivity = np.stack([session["F_SI"].ravel(), session["B_SI"].ravel(), session["O_SI"].ravel()])
             preference = PREFERENCE[np.argmax(selectivity[:, in_area], axis=0)]
 
+            # per-unit firing-dynamics cluster (paper Fig. 3: k-means on each unit's PSTH ->
+            # 3 temporal types; 1=early-suppression/delayed-rise, 2=late-peak/gradual-decay,
+            # 3=rapid-onset/fast-firing). Distinct from `category` (a per-patch B/F/O label).
+            unit_type = np.asarray(session["UnitType"]).ravel()[in_area].astype(int)
+
             resp_blocks.append(resp)
             meta_blocks.append(pd.DataFrame({
                 "session": row.SesIdx,                                  # SesIdx (1..90)
@@ -58,6 +63,7 @@ class TripleN():
                 "region": row.Area,                                     # IT / EVC
                 "macaque": f"M{int(area_subject.get(row.RoiIndex))}",   # M1..M5
                 "preference": preference,                               # this unit's tuning: F / B / O
+                "unit_type": unit_type,                                 # firing-rate cluster: 1 / 2 / 3
                 "depth": pos[in_area],                                  # unit depth (microns)
             }))
 

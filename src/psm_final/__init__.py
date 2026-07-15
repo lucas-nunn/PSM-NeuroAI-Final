@@ -26,8 +26,11 @@ __all__ = [
     "correlation_rdm",
     "BetaVAE",
     "COCODataset",
+    "EncodingModel",
+    "load_vdvae",
     "ModelAnalysisBase",
     "BetaVAEAnalysis",
+    "VDVAEAnalysis",
     "run_rsa",
 ]
 
@@ -55,8 +58,11 @@ _EXPORTS = {
     "correlation_rdm": ".analysis.correlating",
     "BetaVAE": ".models.beta_vae",
     "COCODataset": ".models.beta_vae",
+    "EncodingModel": ".models.encoding",
+    "load_vdvae": ".models.vdvae",
     "ModelAnalysisBase": ".analysis.model",
     "BetaVAEAnalysis": ".analysis.beta_vae_analysis",
+    "VDVAEAnalysis": ".analysis.vdvae_analysis",
     "run_rsa": ".analysis.runner",
 }
 

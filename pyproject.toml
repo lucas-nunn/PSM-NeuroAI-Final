@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 psm-rsa = "psm_final.analysis.runner:main"
+psm-vdvae = "psm_final.models.vdvae:main"
 
 [project.optional-dependencies]
 notebook = [

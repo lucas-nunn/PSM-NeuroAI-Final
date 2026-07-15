@@ -7,6 +7,7 @@ __all__ = [
     "correlation_rdm",
     "ModelAnalysisBase",
     "BetaVAEAnalysis",
+    "VDVAEAnalysis",
     "run_rsa",
     "discover_analyzers",
 ]
@@ -16,6 +17,7 @@ _EXPORTS = {
     "correlation_rdm": ".correlating",
     "ModelAnalysisBase": ".model",
     "BetaVAEAnalysis": ".beta_vae_analysis",
+    "VDVAEAnalysis": ".vdvae_analysis",
     "run_rsa": ".runner",
     "discover_analyzers": ".runner",
 }
