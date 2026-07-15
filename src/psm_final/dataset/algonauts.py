@@ -114,3 +114,25 @@ class Algonauts():
 
         return dist
  
+    def response_matrix(self, subject, indices=None, roi=None):
+        """Raw per-vertex fMRI responses for a stimulus set (no RDM computed).
+
+        Returns (lh_responses, rh_responses), each shaped (n_stimuli, n_vertices).
+        """
+        if indices is None:
+            indices = self.nsd_indices
+
+        _, train_rows = self.shared_stimuli_indices(subject, indices)
+
+        lh = np.load(f"{self.algonauts_dir}/subj0{subject}/training_split/training_fmri/lh_training_fmri.npy")
+        rh = np.load(f"{self.algonauts_dir}/subj0{subject}/training_split/training_fmri/rh_training_fmri.npy")
+
+        lh_shared = lh[train_rows]
+        rh_shared = rh[train_rows]
+
+        if roi is not None:
+            lh_roi, rh_roi = self.roi_mask(roi, subject)
+            lh_shared = lh_shared[:, lh_roi]
+            rh_shared = rh_shared[:, rh_roi]
+
+        return lh_shared, rh_shared
