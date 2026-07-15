@@ -91,28 +91,9 @@ class Algonauts():
         return lh_roi, rh_roi
 
     def compute_rdm(self, subject, indices=None, roi=None):
-        if indices is None:
-            indices = self.nsd_indices
-
-        _, train_rows = self.shared_stimuli_indices(subject, indices)
-
-        lh = np.load(f"{self.algonauts_dir}/subj0{subject}/training_split/training_fmri/lh_training_fmri.npy")
-        rh = np.load(f"{self.algonauts_dir}/subj0{subject}/training_split/training_fmri/rh_training_fmri.npy")
-
-        lh_shared = lh[train_rows]
-        rh_shared = rh[train_rows]
-
-        # Restrict to an ROI's vertices (challenge-space masks index the fMRI columns).
-        if roi is not None:
-            lh_roi, rh_roi = self.roi_mask(roi, subject)
-            lh_shared = lh_shared[:, lh_roi]
-            rh_shared = rh_shared[:, rh_roi]
-
+        lh_shared, rh_shared = self.response_matrix(subject, indices=indices, roi=roi)
         shared = np.concat((lh_shared, rh_shared), axis=1)
-
-        dist = correlation_rdm(shared, condensed=True)
-
-        return dist
+        return correlation_rdm(shared, condensed=True)
  
     def response_matrix(self, subject, indices=None, roi=None):
         """Raw per-vertex fMRI responses for a stimulus set (no RDM computed).
