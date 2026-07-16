@@ -1,4 +1,7 @@
 
+import re
+from pathlib import Path
+
 import torch
 import torchvision.transforms as transforms
 
@@ -7,6 +10,42 @@ from psm_final.models.beta_vae import BetaVAE
 
 
 class BetaVAEAnalysis(ModelAnalysisBase):
+    # Trained checkpoints live at ``<checkpoints_root>/results/beta_vae/<run>/vae.pth``
+    # (matching where the training scripts save under ``results/``); the RSA runner
+    # globs this to discover every model.
+    CHECKPOINT_GLOB = "results/beta_vae/*/vae.pth"
+
+    @classmethod
+    def discover(cls, *, triple_n_path, checkpoints_root, device=None):
+        """Find every trained β-VAE checkpoint under ``checkpoints_root`` and return
+        one ``(label, factory)`` per model, sorted by (beta, latent).
+
+        Run directories are named like ``latent_512_beta_2.0_epochs_50_seed_42``; the
+        latent size and beta are parsed from that name for a short, unique label.
+        """
+        specs = []
+        for ckpt in Path(checkpoints_root).glob(cls.CHECKPOINT_GLOB):
+            name = ckpt.parent.name
+            beta_match = re.search(r"beta_([0-9.]+)", name)
+            latent_match = re.search(r"latent_(\d+)", name)
+            beta = float(beta_match.group(1)) if beta_match else None
+            latent = int(latent_match.group(1)) if latent_match else None
+            label = "βVAE"
+            if latent is not None:
+                label += f" z={latent}"
+            if beta is not None:
+                label += f" β={beta:g}"
+            specs.append((beta if beta is not None else float("inf"),
+                          latent if latent is not None else 0, label, str(ckpt)))
+        specs.sort(key=lambda spec: (spec[0], spec[1]))
+        # `path=path` binds the current checkpoint into each factory (avoids the
+        # classic late-binding closure bug where all factories share the last path).
+        return [
+            (label, lambda path=path: cls(triple_n_path=triple_n_path,
+                                          model_path=path, device=device))
+            for _, _, label, path in specs
+        ]
+
     def __init__(self, triple_n_path, model_path, latent_dim=None, device=None):
         super().__init__(triple_n_path)
 
