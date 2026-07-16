@@ -16,6 +16,7 @@ from pathlib import Path
 
 import torch
 import numpy as np 
+import pandas as pd
 import torch.nn as nn
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader, Subset, random_split
@@ -79,7 +80,13 @@ class SimpleCNN(nn.Module):
             return x, features
         return x
 
-def build_coco_classification_cache(annotation_path, image_dir, cache_path, image_size=IMAGE_SIZE):
+def load_shared_stimuli_coco_ids(crosswalk_path):
+    crosswalk = pd.read_csv(crosswalk_path)
+    scenes = crosswalk[crosswalk['kind'] == 'scene']
+    return set(scenes['coco_id'].dropna().astype(int))
+
+def build_coco_classification_cache(annotation_path, image_dir, cache_path, image_size=IMAGE_SIZE,
+                                     exclude_coco_ids=None):
     """
     Turn COCO's multi-object annotations into single-label classification data,
     using every category found in the annotation file (no restriction/subset).
@@ -90,6 +97,7 @@ def build_coco_classification_cache(annotation_path, image_dir, cache_path, imag
     at all are skipped.
     """
     image_dir = Path(image_dir)
+    exclude_coco_ids = set(exclude_coco_ids) if exclude_coco_ids else set()
 
     # Loads the whole ~450MB file into memory once -- fine for a one-time
     # cache-building pass, and the result feeds straight into the loop below.
@@ -112,6 +120,8 @@ def build_coco_classification_cache(annotation_path, image_dir, cache_path, imag
     best_label = {}
     for ann in coco_data['annotations']:
         image_id = ann['image_id']
+        if image_id in exclude_coco_ids:
+            continue
         area = ann['area']
         if image_id not in best_area or area > best_area[image_id]:
             best_area[image_id] = area
@@ -124,7 +134,8 @@ def build_coco_classification_cache(annotation_path, image_dir, cache_path, imag
         raise RuntimeError('no images have any annotations in this file')
 
     print(f'{len(kept_image_ids)} images matched across {len(class_names)} categories '
-          f'(out of {len(coco_data["images"])} total in the annotation file)')
+          f'(out of {len(coco_data["images"])} total in the annotation file, '
+          f'{len(exclude_coco_ids)} excluded)')
 
     transform = _image_transform(image_size)
     cache = torch.empty((len(kept_image_ids), 3, image_size, image_size), dtype=torch.uint8)
@@ -154,8 +165,9 @@ class COCOClassificationDataset(Dataset):
     file if the image set or image_size changes.
     """
     def __init__(self, annotation_path, image_dir, cache_dir='./cache', image_size=IMAGE_SIZE,
-                 max_images=None):
-        cache_path = Path(cache_dir) / f'{Path(image_dir).name}_{image_size}px_allcls.pt'
+                 max_images=None, exclude_coco_ids=None):
+        tag = 'excl' if exclude_coco_ids else 'all'
+        cache_path = Path(cache_dir) / f'{Path(image_dir).name}_{image_size}px_{tag}cls.pt'
         if cache_path.exists():
             print(f'loading cached images from {cache_path}')
             data = torch.load(cache_path)
@@ -163,7 +175,7 @@ class COCOClassificationDataset(Dataset):
         else:
             print(f'no cache at {cache_path}; building from COCO annotations...')
             self.images, self.labels, self.classes = build_coco_classification_cache(
-                annotation_path, image_dir, cache_path, image_size,
+                annotation_path, image_dir, cache_path, image_size, exclude_coco_ids=exclude_coco_ids,
             )
 
         # Optionally keep only a random subset to shrink the in-RAM footprint
@@ -213,6 +225,9 @@ def build_parser():
                               '(deterministic). Shrinks the in-RAM cache; 0 = use all images.')
     parser.add_argument('--k_folds', type=int, default=5,
                      help='Number of CV folds to run on the training set before the final model')
+    parser.add_argument('--exclude_crosswalk', type=str, default=None,
+                         help='Path to triple_n_crosswalk.csv -- excludes its shared-1000 '
+                              'RSA/encoding stimuli from training')
     return parser
 
 def k_fold_indices(n_samples, k, seed=42):
@@ -229,6 +244,11 @@ def main():
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    exclude_coco_ids = (
+        load_shared_stimuli_coco_ids(args.exclude_crosswalk) if args.exclude_crosswalk else None
+    )
+    if exclude_coco_ids:
+        print(f'excluding {len(exclude_coco_ids)} shared-stimuli images from training')
 
     coco_train = COCOClassificationDataset(
         annotation_path=args.annotation_path,
@@ -236,6 +256,7 @@ def main():
         cache_dir=args.cache_dir,
         image_size=args.image_size,
         max_images=args.max_train_images or None,
+        exclude_coco_ids=exclude_coco_ids,
     )
 
     coco_dataloader_train = DataLoader(
@@ -261,10 +282,6 @@ def main():
 
     assert coco_train.classes == coco_test.classes, "class order mismatch between train and val!"
 
-    # --- k-fold cross-validation on the training set -----------------------
-    # Trains a FRESH model per fold (never reusing weights across folds) for a
-    # robust generalization estimate, before the final model below trains on
-    # ALL of coco_train and gets evaluated once on the real held-out val2017.
     folds = k_fold_indices(len(coco_train), args.k_folds, seed=args.seed)
     fold_val_losses, fold_val_accuracies = [], []
 
@@ -296,15 +313,11 @@ def main():
     print(f'\n=== CV summary ({args.k_folds} folds) ===')
     print(f'val loss     -- mean: {np.mean(fold_val_losses):.4f}  std: {np.std(fold_val_losses):.4f}')
     print(f'val accuracy -- mean: {np.mean(fold_val_accuracies):.2f}%  std: {np.std(fold_val_accuracies):.2f}%')
-    # -------------------------------------------------------------------------
-    # create an instance of the model 
-    cnn = SimpleCNN(num_classes=len(coco_train.classes))
 
-    # Move the model to the desired device
+    cnn = SimpleCNN(num_classes=len(coco_train.classes))
     cnn = cnn.to(device)
 
-    #Criterion and optimizer
-    cnn_criterion = nn.CrossEntropyLoss()  # Standardly used for classification
+    cnn_criterion = nn.CrossEntropyLoss()
     cnn_optimizer = torch.optim.Adam(cnn.parameters(), lr=args.learning_rate)
         
     history = train_and_test(cnn, coco_dataloader_train, coco_dataloader_test, args.num_epochs, cnn_criterion, cnn_optimizer, device)
@@ -315,7 +328,6 @@ def main():
     out_dir = Path('./results/cnn_basemodel')
     out_dir.mkdir(parents=True, exist_ok=True)
     np.savetxt(out_dir / 'train_history_simple_cnn.csv', history, delimiter=',', header='batch_loss', comments='')
-    # after
     torch.save({
         'model_state_dict': cnn.state_dict(),
         'classes': coco_train.classes,
