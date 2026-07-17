@@ -8,6 +8,7 @@ __all__ = [
     "ModelAnalysisBase",
     "BetaVAEAnalysis",
     "VDVAEAnalysis",
+    "AutoKL",
     "run_rsa",
     "discover_analyzers",
 ]
@@ -18,6 +19,7 @@ _EXPORTS = {
     "ModelAnalysisBase": ".model",
     "BetaVAEAnalysis": ".beta_vae_analysis",
     "VDVAEAnalysis": ".vdvae_analysis",
+    "AutoKL": ".autoencoderKL",
     "run_rsa": ".runner",
     "discover_analyzers": ".runner",
 }

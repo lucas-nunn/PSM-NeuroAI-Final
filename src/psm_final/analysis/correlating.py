@@ -2,6 +2,61 @@ import numpy as np
 
 from scipy.stats import spearmanr
 
+
+def noise_normalize_correlations(correlations, ceilings, *, ceiling_squared=False):
+    """Normalize correlations by their attainable correlation ceilings.
+
+    Parameters
+    ----------
+    correlations
+        Raw correlation coefficient(s).
+    ceilings
+        Matching noise-ceiling value(s). Set ``ceiling_squared=True`` when these
+        are reliability / explainable-variance values (as in Algonauts and the
+        Triple-N split-half reliability); they are square-rooted before normalizing
+        a correlation.
+    ceiling_squared
+        Whether ``ceilings`` are expressed in squared-correlation units.
+
+    Returns
+    -------
+    signed, squared
+        ``r / r_ceiling`` and ``r**2 / r_ceiling**2``. Invalid, non-positive
+        ceilings remain NaN. Values are deliberately not clipped: estimates above
+        one are diagnostically useful because empirical ceilings are themselves
+        uncertain.
+    """
+    correlations, ceilings = np.broadcast_arrays(
+        np.asarray(correlations, dtype=float),
+        np.asarray(ceilings, dtype=float),
+    )
+    correlation_ceiling = (
+        np.sqrt(np.clip(ceilings, 0.0, None))
+        if ceiling_squared
+        else ceilings
+    )
+    valid = (
+        np.isfinite(correlations)
+        & np.isfinite(correlation_ceiling)
+        & (correlation_ceiling > 0)
+    )
+    signed = np.full(correlations.shape, np.nan, dtype=float)
+    squared = np.full(correlations.shape, np.nan, dtype=float)
+    np.divide(
+        correlations,
+        correlation_ceiling,
+        out=signed,
+        where=valid,
+    )
+    np.divide(
+        correlations ** 2,
+        correlation_ceiling ** 2,
+        out=squared,
+        where=valid,
+    )
+    return signed, squared
+
+
 def noise_ceiling(rdms: np.ndarray):
     rdms = np.asarray(rdms)
     n = rdms.shape[0]

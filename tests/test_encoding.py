@@ -4,7 +4,13 @@ import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr
 
-from psm_final.analysis.encoding import nested_encoding_cv
+from psm_final.analysis.encoding import (
+    DEFAULT_MIN_TRIPLE_N_RELIABILITY,
+    EncodingCVResult,
+    RESULT_COLUMNS,
+    _noise_normalized_result,
+    nested_encoding_cv,
+)
 from psm_final.analysis.model import ModelAnalysisBase
 from psm_final.models.encoding import EncodingModel
 
@@ -79,6 +85,11 @@ class NestedEncodingTests(unittest.TestCase):
                 self.assertGreater(result.outer_scores.mean(), 0.99)
                 self.assertEqual(len(result.outer_selected_alphas), 5)
                 self.assertEqual(result.n_targets, 3)
+                self.assertEqual(result.outer_target_scores.shape, (5, 3))
+                np.testing.assert_allclose(
+                    result.outer_scores,
+                    np.nanmean(result.outer_target_scores, axis=1),
+                )
 
     def test_rejects_unknown_regression(self):
         with self.assertRaisesRegex(ValueError, "ridge.*lasso"):
@@ -88,6 +99,66 @@ class NestedEncodingTests(unittest.TestCase):
                 regression="elasticnet",
                 alphas=[0.1],
             )
+
+
+class EncodingNoiseNormalizationTests(unittest.TestCase):
+    def test_result_schema_keeps_raw_and_normalized_metrics(self):
+        self.assertEqual(DEFAULT_MIN_TRIPLE_N_RELIABILITY, 0.4)
+        self.assertIn("mean_encoding_score", RESULT_COLUMNS)
+        self.assertIn("noise_ceiling_r", RESULT_COLUMNS)
+        self.assertIn("noise_ceiling_threshold", RESULT_COLUMNS)
+        self.assertIn("mean_noise_normalized_r", RESULT_COLUMNS)
+        self.assertIn("mean_noise_normalized_r2", RESULT_COLUMNS)
+        self.assertIn("n_ceiling_targets", RESULT_COLUMNS)
+
+    def test_summary_normalizes_targets_before_averaging_folds(self):
+        result = EncodingCVResult(
+            outer_scores=np.array([0.4, 0.8]),
+            outer_target_scores=np.array([
+                [0.3, 0.4, 0.5],
+                [0.6, 0.8, 1.0],
+            ]),
+            outer_selected_alphas=(0.1, 0.1),
+            best_alpha=0.1,
+            alpha_selection_stability=1.0,
+            n_targets=3,
+        )
+
+        summary = _noise_normalized_result(
+            result,
+            noise_ceiling=np.array([0.36, 0.64, 0.2]),
+            minimum_ceiling=0.4,
+        )
+
+        (
+            ceiling_r,
+            threshold,
+            mean_r,
+            std_r,
+            mean_r2,
+            std_r2,
+            n_targets,
+        ) = summary
+        self.assertAlmostEqual(ceiling_r, 0.8)
+        self.assertAlmostEqual(threshold, 0.4)
+        self.assertAlmostEqual(mean_r, 0.75)
+        self.assertAlmostEqual(std_r, 0.25)
+        self.assertAlmostEqual(mean_r2, 0.625)
+        self.assertAlmostEqual(std_r2, 0.375)
+        self.assertEqual(n_targets, 1)
+
+    def test_summary_rejects_misaligned_ceiling_vector(self):
+        result = EncodingCVResult(
+            outer_scores=np.array([0.2]),
+            outer_target_scores=np.array([[0.1, 0.3]]),
+            outer_selected_alphas=(0.1,),
+            best_alpha=0.1,
+            alpha_selection_stability=1.0,
+            n_targets=2,
+        )
+
+        with self.assertRaisesRegex(ValueError, "one value per neural target"):
+            _noise_normalized_result(result, np.array([0.5]))
 
 
 class _FakeAnalyzer(ModelAnalysisBase):
@@ -118,19 +189,36 @@ class _FakeAlgonauts:
     def roi_mask(self, roi, subject):
         return np.ones(2, dtype=bool), np.ones(1, dtype=bool)
 
+    def noise_ceiling(self, subject, roi=None):
+        return np.array([0.25, 0.64]), np.array([1.0])
+
 
 class _FakeTripleN:
     def __init__(self, responses):
         self.responses = responses
         self.units = pd.DataFrame({
-            "macaque": ["M1", "M1"],
-            "area_label": ["IT", "IT"],
+            "macaque": ["M1"] * 6,
+            "area_label": ["V1", "V1", "V1", "IT", "IT", "IT"],
+            "region": ["EVC", "EVC", "EVC", "IT", "IT", "IT"],
+            "unit_type": [1, 1, 1, 2, 2, 2],
+            "reliability_best": [0.81, 0.64, 0.20, 0.64, 0.49, 0.10],
         })
 
-    def response_matrix(self, macaque=None, area_label=None, indices=None, **filters):
-        if macaque not in (None, "M1") or area_label != "IT":
+    def _mask(self, **filters):
+        mask = np.ones(len(self.units), dtype=bool)
+        for name, value in filters.items():
+            if value is not None:
+                mask &= self.units[name].to_numpy() == value
+        return mask
+
+    def response_matrix(self, indices=None, **filters):
+        mask = self._mask(**filters)
+        if mask.sum() < 2:
             raise ValueError("no matching units")
-        return self.responses[np.asarray(indices) - 1]
+        return self.responses[np.asarray(indices) - 1][:, mask]
+
+    def unit_metadata(self, **filters):
+        return self.units.loc[self._mask(**filters)].reset_index(drop=True)
 
 
 class AnalyzerEncodingIntegrationTests(unittest.TestCase):
@@ -138,7 +226,7 @@ class AnalyzerEncodingIntegrationTests(unittest.TestCase):
         rng = np.random.default_rng(12)
         features = rng.normal(size=(30, 3))
         algonauts_responses = features @ rng.normal(size=(3, 3))
-        triple_n_responses = features @ rng.normal(size=(3, 2))
+        triple_n_responses = features @ rng.normal(size=(3, 6))
         analyzer = _FakeAnalyzer(features)
 
         tables = analyzer.encoding_tables(
@@ -147,7 +235,6 @@ class AnalyzerEncodingIntegrationTests(unittest.TestCase):
             shared_ids=list(range(1, 31)),
             subjects=[1],
             rois=["visual"],
-            area_labels=["IT"],
             regression="ridge",
             alphas=[1e-4, 1e2],
             outer_folds=3,
@@ -156,12 +243,32 @@ class AnalyzerEncodingIntegrationTests(unittest.TestCase):
 
         self.assertEqual(analyzer.feature_calls, 1)
         self.assertEqual(tables["algonauts"].loc["visual", "n_targets"], 3)
-        self.assertEqual(tables["triple_n"].loc["IT", "n_targets"], 2)
+        self.assertEqual(list(tables["triple_n"].index), ["IT", "V1"])
+        self.assertEqual(tables["triple_n"].index.name, "area_label")
+        self.assertEqual(tables["triple_n"].loc["V1", "n_targets"], 2)
+        self.assertEqual(
+            tables["triple_n"].loc["V1", "n_ceiling_targets"], 2
+        )
+        self.assertEqual(
+            tables["triple_n"].loc[
+                "V1", "noise_ceiling_threshold"
+            ],
+            DEFAULT_MIN_TRIPLE_N_RELIABILITY,
+        )
+        self.assertEqual(
+            tables["algonauts"].loc["visual", "n_ceiling_targets"], 3
+        )
         self.assertGreater(
             tables["algonauts"].loc["visual", "mean_encoding_score"], 0.99
         )
         self.assertGreater(
             tables["triple_n"].loc["IT", "mean_encoding_score"], 0.99
+        )
+        self.assertGreater(
+            tables["algonauts"].loc[
+                "visual", "mean_noise_normalized_r"
+            ],
+            1.0,
         )
 
 

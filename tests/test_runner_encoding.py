@@ -4,6 +4,7 @@ from contextlib import ExitStack
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pandas as pd
@@ -18,11 +19,35 @@ def _encoding_frame(index_name, labels, scores=None):
         {
             "mean_encoding_score": scores,
             "std_encoding_score": [0.05] * len(labels),
+            "noise_ceiling_r": [0.8] * len(labels),
+            "noise_ceiling_threshold": [0.4] * len(labels),
+            "mean_noise_normalized_r": [score / 0.8 for score in scores],
+            "std_noise_normalized_r": [0.06] * len(labels),
+            "mean_noise_normalized_r2": [
+                (score / 0.8) ** 2 for score in scores
+            ],
+            "std_noise_normalized_r2": [0.04] * len(labels),
+            "n_ceiling_targets": [10] * len(labels),
             "best_alpha": [0.1] * len(labels),
             "alpha_selection_stability": [0.8] * len(labels),
             "outer_selected_alphas": ["0.1,0.1,0.01,0.1,0.1"] * len(labels),
             "n_targets": [12] * len(labels),
             "n_outer_folds": [5] * len(labels),
+        },
+        index=pd.Index(labels, name=index_name),
+    )
+
+
+def _rsa_frame(index_name, labels):
+    labels = list(labels)
+    return pd.DataFrame(
+        {
+            "spearman_rho": [0.35] * len(labels),
+            "spearman_rho_individual_mean": [0.3] * len(labels),
+            "noise_ceiling_low": [0.4] * len(labels),
+            "noise_ceiling_high": [0.5] * len(labels),
+            "noise_normalized_spearman_rho": [0.6] * len(labels),
+            "noise_normalized_spearman_rho2": [0.36] * len(labels),
         },
         index=pd.Index(labels, name=index_name),
     )
@@ -38,7 +63,7 @@ class _FakeEncodingAnalyzer:
             else algonauts_table
         )
         self.triple_n_table = (
-            _encoding_frame("area_label", ["IT"])
+            _encoding_frame("area_label", ["IT", "V1"])
             if triple_n_table is None
             else triple_n_table
         )
@@ -65,6 +90,9 @@ class RunnerParserAndFilteringTests(unittest.TestCase):
         self.assertEqual(args.inner_folds, 3)
         self.assertEqual(args.seed, 42)
         self.assertIsNone(args.output_dir)
+        self.assertIsNone(args.areas)
+        self.assertEqual(args.triple_n_min_reliability, 0.4)
+        self.assertIsNone(args.algonauts_noise_ceiling_dir)
 
     def test_encoding_cli_options_parse(self):
         args = runner.build_parser().parse_args(
@@ -82,6 +110,13 @@ class RunnerParserAndFilteringTests(unittest.TestCase):
                 "2",
                 "--seed",
                 "7",
+                "--algonauts-noise-ceiling-dir",
+                "ceilings",
+                "--areas",
+                "IT",
+                "V1",
+                "--triple-n-min-reliability",
+                "0.5",
                 "--models",
                 "*vae*",
                 "pixel*",
@@ -95,6 +130,9 @@ class RunnerParserAndFilteringTests(unittest.TestCase):
         self.assertEqual(args.outer_folds, 4)
         self.assertEqual(args.inner_folds, 2)
         self.assertEqual(args.seed, 7)
+        self.assertEqual(args.algonauts_noise_ceiling_dir, "ceilings")
+        self.assertEqual(args.areas, ["IT", "V1"])
+        self.assertEqual(args.triple_n_min_reliability, 0.5)
         self.assertEqual(args.models, ["*vae*", "pixel*"])
         self.assertTrue(args.resume)
 
@@ -141,7 +179,8 @@ class RunEncodingTests(unittest.TestCase):
         options = {
             "subjects": [1, 2],
             "rois": ["V1"],
-            "area_labels": ["IT"],
+            "area_labels": ["IT", "V1"],
+            "triple_n_min_reliability": 0.4,
             "regression": "ridge",
             "alphas": [0.01, 0.1],
             "outer_folds": 5,
@@ -184,12 +223,36 @@ class RunEncodingTests(unittest.TestCase):
         self.assertIs(shared_ids, self.shared_ids)
         self.assertEqual(kwargs["subjects"], [1, 2])
         self.assertEqual(kwargs["rois"], ["V1"])
-        self.assertEqual(kwargs["area_labels"], ["IT"])
+        self.assertEqual(kwargs["area_labels"], ["IT", "V1"])
+        self.assertEqual(kwargs["triple_n_min_reliability"], 0.4)
         self.assertEqual(kwargs["regression"], "ridge")
         self.assertEqual(kwargs["alphas"], [0.01, 0.1])
         self.assertEqual(kwargs["outer_folds"], 5)
         self.assertEqual(kwargs["inner_folds"], 3)
         self.assertEqual(kwargs["seed"], 9)
+        self.assertEqual(results["config"]["schema_version"], 3)
+        self.assertEqual(results["config"]["area_labels"], ["IT", "V1"])
+        self.assertEqual(
+            results["config"]["triple_n_groupby"], ["area_label"]
+        )
+        self.assertEqual(
+            results["config"]["triple_n_segmentation"], "area_label"
+        )
+        self.assertEqual(results["config"]["triple_n_min_reliability"], 0.4)
+
+    def test_area_labels_select_encoding_groups(self):
+        analyzer = _FakeEncodingAnalyzer(
+            triple_n_table=_encoding_frame("area_label", ["IT"])
+        )
+
+        results = self._run(
+            [("Demo Model", Mock(return_value=analyzer))],
+            area_labels=["IT"],
+        )
+
+        kwargs = analyzer.calls[0][3]
+        self.assertEqual(kwargs["area_labels"], ["IT"])
+        self.assertEqual(results["config"]["triple_n_segmentation"], "area_label")
 
     def test_progress_callback_identifies_model_modality_group_and_count(self):
         analyzer = _FakeEncodingAnalyzer(invoke_progress=True)
@@ -310,13 +373,28 @@ class RunEncodingTests(unittest.TestCase):
 
             self.assertEqual(len(replacement.calls), 1)
 
-    def test_new_run_invalidates_stale_same_regression_heatmaps(self):
+    def test_new_run_removes_retired_grouping_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
-            stale = [
+            output_id = runner._model_output_ids(
+                [("Demo Model", Mock())]
+            )["Demo Model"]
+            retired = [
+                Path(tmp) / "encoding_ridge_triple_n_region_unit_type.png",
+                Path(tmp)
+                / "encoding_ridge_triple_n_region_unit_type_noise_normalized.png",
+                runner._encoding_paths(
+                    tmp, output_id, "ridge", "region | unit_type"
+                )["triple_n"],
+            ]
+            transient = [
                 Path(tmp) / "encoding_ridge_algonauts.png",
+                Path(tmp) / "encoding_ridge_algonauts_noise_normalized.png",
                 Path(tmp) / "encoding_ridge_triple_n_area_label.png",
             ]
-            for path in stale:
+            current_table = runner._encoding_paths(
+                tmp, output_id, "ridge", "area_label"
+            )["triple_n"]
+            for path in [*retired, *transient, current_table]:
                 path.write_bytes(b"old plot")
 
             self._run(
@@ -324,7 +402,10 @@ class RunEncodingTests(unittest.TestCase):
                 output_dir=tmp,
             )
 
-            self.assertTrue(all(not path.exists() for path in stale))
+            self.assertTrue(all(not path.exists() for path in retired))
+            self.assertTrue(all(not path.exists() for path in transient))
+            self.assertTrue(current_table.exists())
+            self.assertNotEqual(current_table.read_bytes(), b"old plot")
 
     def test_known_unsafe_factory_cannot_bypass_safety_via_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -359,7 +440,7 @@ class RunEncodingTests(unittest.TestCase):
                     [("Demo Model", factory)],
                     subjects=[1],
                     rois=["V1"],
-                    area_labels=["IT"],
+                    area_labels=["V1"],
                     outer_folds=5,
                     inner_folds=3,
                 )
@@ -396,6 +477,37 @@ class RunEncodingTests(unittest.TestCase):
                 )
 
 
+class EncodingFingerprintTests(unittest.TestCase):
+    def test_algonauts_noise_ceiling_change_invalidates_data_fingerprint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            algonauts_root = root / "training"
+            ceiling_root = root / "test"
+            triple_n_root = root / "triple_n"
+            ceiling_file = (
+                ceiling_root
+                / "subj01"
+                / "test_split"
+                / "noise_ceiling"
+                / "lh_noise_ceiling.npy"
+            )
+            ceiling_file.parent.mkdir(parents=True)
+            algonauts_root.mkdir()
+            triple_n_root.mkdir()
+            ceiling_file.write_bytes(b"first ceiling")
+            algonauts = SimpleNamespace(
+                algonauts_dir=algonauts_root,
+                noise_ceiling_dir=ceiling_root,
+            )
+            triple_n = SimpleNamespace(triple_n_dir=triple_n_root)
+
+            before = runner._data_fingerprint(algonauts, triple_n, [1])
+            ceiling_file.write_bytes(b"changed ceiling values")
+            after = runner._data_fingerprint(algonauts, triple_n, [1])
+
+            self.assertNotEqual(before, after)
+
+
 class EncodingOutputTests(unittest.TestCase):
     def _results(self, regression="ridge"):
         return {
@@ -404,15 +516,25 @@ class EncodingOutputTests(unittest.TestCase):
                 "Model B": _encoding_frame("roi", ["V1", "V2"], [0.3, 0.4]),
             },
             "triple_n": {
-                "Model A": _encoding_frame("area_label", ["IT"], [0.6]),
-                "Model B": _encoding_frame("area_label", ["IT"], [0.7]),
+                "Model A": _encoding_frame(
+                    "area_label", ["IT"], [0.6]
+                ),
+                "Model B": _encoding_frame(
+                    "area_label", ["IT"], [0.7]
+                ),
             },
             "config": {
+                "schema_version": 3,
                 "regression": regression,
                 "alphas": [0.01, 0.1],
                 "outer_folds": 5,
                 "inner_folds": 3,
                 "seed": 42,
+                "area_labels": ["IT"],
+                "triple_n_groupby": ["area_label"],
+                "triple_n_groups": ["IT"],
+                "triple_n_segmentation": "area_label",
+                "triple_n_min_reliability": 0.4,
             },
             "subjects": [1, 2],
             "errors": {},
@@ -438,6 +560,10 @@ class EncodingOutputTests(unittest.TestCase):
                 }.issubset(long.columns)
             )
             self.assertEqual(set(long["modality"]), {"algonauts", "triple_n"})
+            triple_rows = long[long["modality"] == "triple_n"]
+            self.assertEqual(
+                set(triple_rows["segmentation"]), {"area_label"}
+            )
             per_model = [
                 path.name
                 for path in Path(tmp).glob("*.csv")
@@ -449,9 +575,12 @@ class EncodingOutputTests(unittest.TestCase):
             self.assertTrue(
                 any("ridge" in name and "triple_n" in name for name in per_model)
             )
+            self.assertTrue(
+                any("triple_n_area_label.csv" in name for name in per_model)
+            )
             self.assertEqual(list(Path(tmp).glob("*.png")), [])
 
-    def test_writes_two_nonempty_heatmaps_and_closes_figures(self):
+    def test_writes_four_nonempty_raw_and_normalized_heatmaps(self):
         import matplotlib
 
         matplotlib.use("Agg", force=True)
@@ -461,7 +590,51 @@ class EncodingOutputTests(unittest.TestCase):
             runner.save_encoding_results(self._results(), tmp, make_plots=True)
 
             pngs = list(Path(tmp).glob("*.png"))
-            self.assertEqual(len(pngs), 2)
+            self.assertEqual(
+                {path.name for path in pngs},
+                {
+                    "encoding_ridge_algonauts.png",
+                    "encoding_ridge_algonauts_noise_normalized.png",
+                    "encoding_ridge_triple_n_area_label.png",
+                    "encoding_ridge_triple_n_area_label_noise_normalized.png",
+                },
+            )
+            self.assertTrue(all(path.stat().st_size > 0 for path in pngs))
+            self.assertEqual(plt.get_fignums(), [])
+
+
+class RsaNormalizedOutputTests(unittest.TestCase):
+    def test_writes_raw_and_normalized_rsa_tables_and_heatmaps(self):
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+
+        results = {
+            "algonauts": {"Model": _rsa_frame("roi", ["V1"])},
+            "triple_n": {
+                "region | unit_type": {
+                    "Model": _rsa_frame(
+                        "region | unit_type", ["EVC | 1", "IT | 1"]
+                    )
+                }
+            },
+            "n_stimuli": 10,
+            "subjects": [1, 2],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            combined = runner.save_results(results, tmp, make_plots=True)
+
+            table = pd.read_csv(combined)
+            self.assertIn("spearman_rho_individual_mean", table.columns)
+            self.assertNotIn("spearman_rho_group_mean", table.columns)
+            self.assertIn("noise_normalized_spearman_rho", table.columns)
+            pngs = list(Path(tmp).glob("rsa_*.png"))
+            self.assertEqual(len(pngs), 4)
+            self.assertEqual(
+                len([path for path in pngs if "noise_normalized" in path.name]),
+                2,
+            )
             self.assertTrue(all(path.stat().st_size > 0 for path in pngs))
             self.assertEqual(plt.get_fignums(), [])
 
@@ -562,6 +735,32 @@ class RunnerMainRoutingTests(unittest.TestCase):
             Path(mocks["save_encoding"].call_args.args[1]),
             runner.DEFAULT_ENCODING_OUTPUT_DIR,
         )
+
+    def test_encoding_main_forwards_area_labels_and_ceiling(self):
+        stack, mocks = self._patch_common()
+        with stack:
+            runner.main(
+                [
+                    "--method",
+                    "encoding",
+                    "--algonauts-dir",
+                    "algo",
+                    "--algonauts-noise-ceiling-dir",
+                    "ceilings",
+                    "--triple-n-dir",
+                    "tn",
+                    "--areas",
+                    "IT",
+                    "--no-plots",
+                ]
+            )
+
+        mocks["algonauts"].assert_called_once_with(
+            "algo", [1], noise_ceiling_dir="ceilings"
+        )
+        kwargs = mocks["run_encoding"].call_args.kwargs
+        self.assertEqual(kwargs["area_labels"], ["IT"])
+        self.assertEqual(kwargs["triple_n_min_reliability"], 0.4)
 
     def test_default_encoding_batch_excludes_opt_in_resource_heavy_models(self):
         stack, mocks = self._patch_common()

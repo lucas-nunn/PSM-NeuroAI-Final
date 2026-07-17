@@ -27,7 +27,9 @@ from psm_final.models.vdvae import (
 
 class VDVAEAnalysis(ModelAnalysisBase):
     # Unlike the beta-VAE arm there are no local training runs to sweep: VDVAE is a
-    # single released checkpoint, cached at <checkpoints_root>/results/vdvae/.
+    # single released checkpoint, cached at <checkpoints_root>/results/vdvae/. A single
+    # arm at TOP_LATENT_RESOLUTION (the res<=4/8/16 layer sweep was turned off
+    # 2026-07-16 -- res<=4 only; see psm_final.models.vdvae).
     @classmethod
     def discover(cls, *, triple_n_path, checkpoints_root, device=None):
         """Return the single pretrained VDVAE, or nothing if it isn't downloaded.

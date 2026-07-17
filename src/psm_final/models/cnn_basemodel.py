@@ -320,14 +320,19 @@ def main():
     cnn_criterion = nn.CrossEntropyLoss()
     cnn_optimizer = torch.optim.Adam(cnn.parameters(), lr=args.learning_rate)
         
-    history = train_and_test(cnn, coco_dataloader_train, coco_dataloader_test, args.num_epochs, cnn_criterion, cnn_optimizer, device)
+    history, val_history = train_and_test(cnn, coco_dataloader_train, coco_dataloader_test, args.num_epochs, cnn_criterion, cnn_optimizer, device)
     print(history)
-    
+
     test(cnn, coco_dataloader_test, cnn_criterion, device)
-    
+
     out_dir = Path('./results/cnn_basemodel')
     out_dir.mkdir(parents=True, exist_ok=True)
     np.savetxt(out_dir / 'train_history_simple_cnn.csv', history, delimiter=',', header='batch_loss', comments='')
+    # Per-epoch validation curve (loss + accuracy over training). Same schema as
+    # results/cnn_resnet50/resnet50_val_history.csv so plot_cnn_training.py reads
+    # both models' val histories symmetrically.
+    pd.DataFrame(val_history).to_csv(out_dir / 'simple_cnn_val_history.csv', index=False)
+    print(f'wrote per-epoch val history to {out_dir / "simple_cnn_val_history.csv"}')
     torch.save({
         'model_state_dict': cnn.state_dict(),
         'classes': coco_train.classes,

@@ -10,6 +10,7 @@ RSA analyzers -- can treat both models identically.
 
 from pathlib import Path
 
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -82,17 +83,20 @@ def main():
     resnet_criterion = nn.CrossEntropyLoss()  # Standardly used for classification
     resnet_optimizer = torch.optim.Adam(resnet50.parameters(), lr=args.learning_rate)
 
-    history = train_and_test(
+    history, val_history = train_and_test(
         resnet50, coco_dataloader_train, coco_dataloader_test,
         args.num_epochs, resnet_criterion, resnet_optimizer, device,
     )
 
-    # train_and_test() prints per-epoch val loss/accuracy internally but doesn't
-    # return them -- one explicit test() call captures the real final numbers.
+    # train_and_test() now returns the per-epoch val loss/accuracy it evaluates
+    # each epoch; one explicit test() call still confirms the final numbers.
     val_loss, val_accuracy = test(resnet50, coco_dataloader_test, resnet_criterion, device)
 
     out_dir = Path('./results/cnn_resnet50')
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Per-epoch validation curve (columns: epoch, val_loss, val_accuracy_pct) --
+    # the file plot_cnn_training.py reads for the ResNet-50 panels.
+    pd.DataFrame(val_history).to_csv(out_dir / 'resnet50_val_history.csv', index=False)
 
     # Same metadata-wrapped save format as cnn_basemodel.py, so cnn_analysis.py
     # style loading code (checkpoint['model_state_dict'], checkpoint['classes'])

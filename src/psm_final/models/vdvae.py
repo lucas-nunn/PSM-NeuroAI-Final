@@ -86,6 +86,11 @@ SCALE = 1.0 / 69.37404
 # Default 4 keeps the embedding (1,056-d) the same order as the beta-VAE's 512-d
 # latent, so the two arms stay comparable. For reference, Brain-Diffuser cuts at 31
 # groups / 91,168 dims -- the first 30 groups (res <= 16) plus the first 32x32 group.
+#
+# The RSA runner discovers a SINGLE VDVAE arm at this cut (the res<=4/8/16 layer sweep
+# was turned off 2026-07-16 -- user decided to run res<=4 only). Because the stack is
+# coarse->fine, a deeper cut would move the embedding toward EVC/V1, not IT; res<=4 is
+# the global / scene-level end of the hierarchy.
 TOP_LATENT_RESOLUTION = 4
 
 

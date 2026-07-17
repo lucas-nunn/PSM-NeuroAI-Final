@@ -39,7 +39,11 @@ import numpy as np
 import pandas as pd
 
 import psm_final.analysis as _analysis_pkg
-from psm_final.analysis.encoding import DEFAULT_ALPHAS, RESULT_COLUMNS
+from psm_final.analysis.encoding import (
+    DEFAULT_ALPHAS,
+    DEFAULT_MIN_TRIPLE_N_RELIABILITY,
+    RESULT_COLUMNS,
+)
 from psm_final.analysis.model import ModelAnalysisBase
 from psm_final.dataset.algonauts import Algonauts
 from psm_final.dataset.triple_n import TripleN
@@ -52,8 +56,6 @@ DEFAULT_CHECKPOINTS_ROOT = _REPO_ROOT          # analyzers glob e.g. beta_vae/*/
 DEFAULT_OUTPUT_DIR = _REPO_ROOT / "results" / "rsa"
 DEFAULT_ENCODING_OUTPUT_DIR = _REPO_ROOT / "results" / "encoding"
 DEFAULT_BOTH_OUTPUT_DIR = _REPO_ROOT / "results" / "analysis"
-
-
 # --------------------------------------------------------------------------- #
 # Discovery
 # --------------------------------------------------------------------------- #
@@ -131,7 +133,7 @@ def collect_models(analyzers, *, triple_n_path, checkpoints_root, device=None):
 def run_rsa(algonauts, triple_n, shared_ids, model_specs, *, subjects=range(1, 9),
             rois=None, area_labels=None, segmentations=None):
     """Correlate every model's RDM against every Algonauts ROI and each Triple-N
-    segmentation (coarse area, area x firing-rate cluster, region).
+    segmentation (coarse area only).
 
     The brain group RDMs + noise ceilings are model-independent, so they are built
     once per segmentation (reusing the model-agnostic building blocks on
@@ -307,6 +309,17 @@ def _data_fingerprint(algonauts, triple_n, subjects):
                 for path in sorted(subject_root.glob(pattern)):
                     _update_file_metadata(digest, path, algo_root)
 
+    ceiling_value = getattr(algonauts, "noise_ceiling_dir", None)
+    if ceiling_value is not None:
+        ceiling_root = Path(ceiling_value).expanduser().resolve()
+        digest.update(f"algonauts_noise_ceiling_root={ceiling_root}\n".encode("utf-8"))
+        for subject in subjects:
+            subject_root = ceiling_root / f"subj0{subject}"
+            for path in sorted(
+                subject_root.glob("test_split/noise_ceiling/*.npy")
+            ):
+                _update_file_metadata(digest, path, ceiling_root)
+
     digest.update(
         f"triple_n_class={type(triple_n).__module__}.{type(triple_n).__qualname__}\n"
         .encode("utf-8")
@@ -388,6 +401,7 @@ def _encoding_config(
     subjects,
     rois,
     area_labels,
+    triple_n_min_reliability,
     nsd_ids,
     stim_index,
     implementation_hash,
@@ -402,6 +416,17 @@ def _encoding_config(
         raise ValueError("outer_folds and inner_folds must both be at least 2")
     if len(nsd_ids) != len(stim_index):
         raise ValueError("aligned NSD and Triple-N stimulus lists must have equal length")
+    area_labels = _deduplicate(
+        [str(label) for label in area_labels], "Triple-N area labels"
+    )
+    if not area_labels:
+        raise ValueError("at least one Triple-N area label is required")
+    triple_n_min_reliability = float(triple_n_min_reliability)
+    if (
+        not np.isfinite(triple_n_min_reliability)
+        or not 0 <= triple_n_min_reliability <= 1
+    ):
+        raise ValueError("triple_n_min_reliability must be between 0 and 1")
     stimulus_pairs = [
         [int(nsd_id), int(triple_n_id)]
         for nsd_id, triple_n_id in zip(nsd_ids, stim_index)
@@ -423,7 +448,7 @@ def _encoding_config(
         json.dumps(stimulus_pairs, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "regression": regression,
         "alphas": _normalise_alphas(alphas),
         "outer_folds": int(outer_folds),
@@ -431,7 +456,11 @@ def _encoding_config(
         "seed": int(seed),
         "subjects": [int(subject) for subject in subjects],
         "rois": [str(roi) for roi in rois],
-        "area_labels": [str(label) for label in area_labels],
+        "area_labels": area_labels,
+        "triple_n_groupby": ["area_label"],
+        "triple_n_groups": area_labels,
+        "triple_n_segmentation": "area_label",
+        "triple_n_min_reliability": triple_n_min_reliability,
         "n_stimuli": n_stimuli,
         "stimulus_hash": stimulus_hash,
         "implementation_hash": implementation_hash,
@@ -440,16 +469,33 @@ def _encoding_config(
     }
 
 
-def _encoding_paths(output_dir, output_id, regression):
+def _encoding_paths(
+    output_dir,
+    output_id,
+    regression,
+    triple_n_segmentation="area_label",
+):
     output_dir = Path(output_dir)
     prefix = f"{output_id}_encoding_{regression}"
     return {
         "algonauts": output_dir / f"{prefix}_algonauts.csv",
-        "triple_n": output_dir / f"{prefix}_triple_n_area_label.csv",
+        "triple_n": output_dir / (
+            f"{prefix}_triple_n_{_slug(triple_n_segmentation)}.csv"
+        ),
         "done": output_dir / f"{prefix}.done.json",
         "error": output_dir / f"{prefix}.error.json",
         "skipped": output_dir / f"{prefix}.skipped.json",
     }
+
+
+def _encoding_paths_from_config(output_dir, output_id, config):
+    """Resolve checkpoint names, including the configured Triple-N grouping."""
+    return _encoding_paths(
+        output_dir,
+        output_id,
+        config["regression"],
+        config.get("triple_n_segmentation", "area_label"),
+    )
 
 
 def _atomic_csv(frame, path, *, index=True):
@@ -479,11 +525,11 @@ def _file_sha256(path):
 def _read_encoding_checkpoint(output_dir, output_id, label, config,
                               model_fingerprint):
     """Load a complete, exact-config checkpoint; return ``None`` if stale/broken."""
-    paths = _encoding_paths(output_dir, output_id, config["regression"])
+    paths = _encoding_paths_from_config(output_dir, output_id, config)
     try:
         manifest = json.loads(paths["done"].read_text())
         if (
-            manifest.get("schema_version") != 2
+            manifest.get("schema_version") != 3
             or manifest.get("label") != label
             or manifest.get("config") != config
             or manifest.get("model_fingerprint") != model_fingerprint
@@ -512,11 +558,11 @@ def _read_encoding_checkpoint(output_dir, output_id, label, config,
 def _write_encoding_checkpoint(output_dir, output_id, label, config,
                                model_fingerprint, tables, elapsed_seconds=None):
     """Atomically write both tables, then the completion marker last."""
-    paths = _encoding_paths(output_dir, output_id, config["regression"])
+    paths = _encoding_paths_from_config(output_dir, output_id, config)
     _atomic_csv(tables["algonauts"], paths["algonauts"])
     _atomic_csv(tables["triple_n"], paths["triple_n"])
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "label": label,
         "config": config,
         "model_fingerprint": model_fingerprint,
@@ -540,10 +586,10 @@ def _write_encoding_checkpoint(output_dir, output_id, label, config,
 
 def _write_encoding_error(output_dir, output_id, label, config,
                           model_fingerprint, exc):
-    paths = _encoding_paths(output_dir, output_id, config["regression"])
+    paths = _encoding_paths_from_config(output_dir, output_id, config)
     _atomic_json(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "label": label,
             "config": config,
             "model_fingerprint": model_fingerprint,
@@ -556,10 +602,10 @@ def _write_encoding_error(output_dir, output_id, label, config,
 
 def _write_encoding_skip(output_dir, output_id, label, config,
                          model_fingerprint, reason):
-    paths = _encoding_paths(output_dir, output_id, config["regression"])
+    paths = _encoding_paths_from_config(output_dir, output_id, config)
     _atomic_json(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "label": label,
             "config": config,
             "model_fingerprint": model_fingerprint,
@@ -578,6 +624,7 @@ def run_encoding(
     subjects=range(1, 9),
     rois=None,
     area_labels=None,
+    triple_n_min_reliability=DEFAULT_MIN_TRIPLE_N_RELIABILITY,
     regression="ridge",
     alphas=None,
     outer_folds=5,
@@ -587,7 +634,7 @@ def run_encoding(
     resume=False,
     fail_fast=False,
 ):
-    """Run nested-CV encoding once per ROI/area, checkpointing each model.
+    """Run nested-CV encoding once per neural group, checkpointing each model.
 
     Resume is deliberately conservative: a model is reused only when a completion
     manifest, both result tables, and every data/CV selection setting match.
@@ -598,7 +645,7 @@ def run_encoding(
     )
     if area_labels is None:
         area_labels = sorted(triple_n.units["area_label"].unique())
-    area_labels = _deduplicate(list(area_labels), "area labels")
+    area_labels = _deduplicate(list(area_labels), "Triple-N area labels")
     nsd_ids, stim_index = ModelAnalysisBase.aligned_stimuli(
         algonauts, triple_n, shared_ids, subjects
     )
@@ -607,6 +654,7 @@ def run_encoding(
     dataset_roots = {}
     for name, dataset, attribute in (
         ("algonauts", algonauts, "algonauts_dir"),
+        ("algonauts_noise_ceiling", algonauts, "noise_ceiling_dir"),
         ("triple_n", triple_n, "triple_n_dir"),
     ):
         value = getattr(dataset, attribute, None)
@@ -622,6 +670,7 @@ def run_encoding(
         subjects=subjects,
         rois=rois,
         area_labels=area_labels,
+        triple_n_min_reliability=triple_n_min_reliability,
         nsd_ids=nsd_ids,
         stim_index=stim_index,
         implementation_hash=implementation_hash,
@@ -636,7 +685,9 @@ def run_encoding(
 
     print(
         f"[encoding] {config['n_stimuli']} shared stimuli | {len(rois)} ROIs | "
-        f"{len(area_labels)} areas | {config['regression']} | "
+        f"{len(config['area_labels'])} Triple-N areas | "
+        f"reliability >= {config['triple_n_min_reliability']!r} | "
+        f"{config['regression']} | "
         f"{config['outer_folds']}x{config['inner_folds']} nested CV | "
         f"{len(config['alphas'])} alphas"
     )
@@ -658,7 +709,16 @@ def run_encoding(
         (output_dir / f"encoding_{config['regression']}_run.json").unlink(
             missing_ok=True
         )
-        for stem in ("algonauts", "triple_n_area_label"):
+        triple_stem = f"triple_n_{_slug(config['triple_n_segmentation'])}"
+        for stem in (
+            "algonauts",
+            "algonauts_noise_normalized",
+            triple_stem,
+            f"{triple_stem}_noise_normalized",
+            # Remove the retired quality-stratified encoding view.
+            "triple_n_region_unit_type",
+            "triple_n_region_unit_type_noise_normalized",
+        ):
             (output_dir / f"encoding_{config['regression']}_{stem}.png").unlink(
                 missing_ok=True
             )
@@ -668,14 +728,24 @@ def run_encoding(
             # old completion markers up front, including models not yet reached if
             # this process is interrupted.
             for label, _factory in model_specs:
-                stale = _encoding_paths(
-                    output_dir, output_ids[label], config["regression"]
+                stale = _encoding_paths_from_config(
+                    output_dir, output_ids[label], config
                 )
                 for key in ("algonauts", "triple_n", "done", "error", "skipped"):
                     stale[key].unlink(missing_ok=True)
 
     for model_index, (label, factory) in enumerate(model_specs, start=1):
         output_id = output_ids[label]
+        if output_dir is not None:
+            # Remove the retired region/unit-quality artifact so it cannot be
+            # mistaken for current area-label output.
+            retired = _encoding_paths(
+                output_dir,
+                output_id,
+                config["regression"],
+                "region | unit_type",
+            )
+            retired["triple_n"].unlink(missing_ok=True)
         model_fingerprint = _factory_fingerprint(factory)
         model_fingerprints[label] = model_fingerprint
         if not getattr(factory, "encoding_cv_safe", True):
@@ -686,9 +756,7 @@ def run_encoding(
             results["skipped"][label] = reason
             warnings.warn(f"encoding skipped for {label!r}: {reason}")
             if output_dir is not None:
-                paths = _encoding_paths(
-                    output_dir, output_id, config["regression"]
-                )
+                paths = _encoding_paths_from_config(output_dir, output_id, config)
                 for key in ("algonauts", "triple_n", "done", "error", "skipped"):
                     paths[key].unlink(missing_ok=True)
                 _write_encoding_skip(
@@ -715,7 +783,7 @@ def run_encoding(
                 continue
 
         paths = (
-            _encoding_paths(output_dir, output_id, config["regression"])
+            _encoding_paths_from_config(output_dir, output_id, config)
             if output_dir is not None
             else None
         )
@@ -758,7 +826,10 @@ def run_encoding(
                 shared_ids,
                 subjects=subjects,
                 rois=rois,
-                area_labels=area_labels,
+                area_labels=config["area_labels"],
+                triple_n_min_reliability=config[
+                    "triple_n_min_reliability"
+                ],
                 regression=config["regression"],
                 alphas=config["alphas"],
                 outer_folds=config["outer_folds"],
@@ -867,21 +938,55 @@ def save_results(results, output_dir, make_plots=True):
         for tables, xlabel, stem, title in plots:
             if not tables:
                 continue
-            fig = ModelAnalysisBase.plot_corr_table(tables, xlabel=xlabel, title=title)
-            path = output_dir / f"{stem}.png"
-            fig.savefig(path, dpi=200, bbox_inches="tight", facecolor="white")
-            print(f"[rsa] wrote {path}")
             import matplotlib.pyplot as plt
-            plt.close(fig)
+
+            figure_specs = (
+                (
+                    "spearman_rho",
+                    None,
+                    "Spearman rho",
+                    stem,
+                    title,
+                ),
+                (
+                    "noise_normalized_spearman_rho",
+                    1.0,
+                    "Noise-normalized Spearman rho",
+                    f"{stem}_noise_normalized",
+                    title.replace("(+ noise ceiling)", "(noise normalized)"),
+                ),
+            )
+            for value_column, reference, colorbar, plot_stem, plot_title in figure_specs:
+                if not any(value_column in table for table in tables.values()):
+                    continue
+                fig = ModelAnalysisBase.plot_corr_table(
+                    tables,
+                    xlabel=xlabel,
+                    title=plot_title,
+                    value_column=value_column,
+                    reference_value=reference,
+                    colorbar_label=colorbar,
+                )
+                if fig is None:
+                    continue
+                path = output_dir / f"{plot_stem}.png"
+                fig.savefig(path, dpi=200, bbox_inches="tight", facecolor="white")
+                print(f"[rsa] wrote {path}")
+                plt.close(fig)
     return combined
 
 
 def _encoding_long_form(results):
     """Stack encoding tables into one review-friendly tidy table."""
     frames = []
+    config = results["config"]
     groups = (
         ("algonauts", "roi", results.get("algonauts", {})),
-        ("triple_n", "area_label", results.get("triple_n", {})),
+        (
+            "triple_n",
+            config.get("triple_n_segmentation", "area_label"),
+            results.get("triple_n", {}),
+        ),
     )
     for modality, segmentation, tables in groups:
         for label, table in tables.items():
@@ -907,7 +1012,6 @@ def _encoding_long_form(results):
         return pd.DataFrame(columns=base_columns)
 
     combined = pd.concat(frames, ignore_index=True)
-    config = results["config"]
     combined["regression"] = config["regression"]
     combined["outer_folds"] = config["outer_folds"]
     combined["inner_folds"] = config["inner_folds"]
@@ -925,16 +1029,25 @@ def _write_encoding_combined(results, output_dir):
     return combined
 
 
-def _encoding_vmax(results):
+def _encoding_vmax(
+    results,
+    value_column="mean_encoding_score",
+    *,
+    extra_columns=(),
+    reference_value=None,
+):
     finite = []
     for modality in ("algonauts", "triple_n"):
         for table in results.get(modality, {}).values():
-            if "mean_encoding_score" not in table:
-                continue
-            values = pd.to_numeric(
-                table["mean_encoding_score"], errors="coerce"
-            ).to_numpy(dtype=float)
-            finite.extend(np.abs(values[np.isfinite(values)]))
+            for column in (value_column, *extra_columns):
+                if column not in table:
+                    continue
+                values = pd.to_numeric(
+                    table[column], errors="coerce"
+                ).to_numpy(dtype=float)
+                finite.extend(np.abs(values[np.isfinite(values)]))
+    if reference_value is not None and np.isfinite(reference_value):
+        finite.append(abs(float(reference_value)))
     return max(finite) if finite and max(finite) > 0 else 1.0
 
 
@@ -987,8 +1100,19 @@ def save_encoding_results(results, output_dir, make_plots=True):
     if make_plots:
         import matplotlib.pyplot as plt
 
-        vmax = _encoding_vmax(results)
-        plots = (
+        raw_vmax = _encoding_vmax(
+            results,
+            extra_columns=("noise_ceiling_r",),
+        )
+        normalized_vmax = _encoding_vmax(
+            results,
+            "mean_noise_normalized_r",
+            reference_value=1.0,
+        )
+        triple_segmentation = config.get(
+            "triple_n_segmentation", "area_label"
+        )
+        modality_plots = (
             (
                 results.get("algonauts", {}),
                 "Algonauts fMRI ROI",
@@ -997,29 +1121,66 @@ def save_encoding_results(results, output_dir, make_plots=True):
             ),
             (
                 results.get("triple_n", {}),
-                "Triple-N area",
-                "triple_n_area_label",
-                "Encoding: model features → Triple-N area",
+                f"Triple-N {triple_segmentation}",
+                f"triple_n_{_slug(triple_segmentation)}",
+                f"Encoding: model features → Triple-N {triple_segmentation}",
             ),
         )
-        for tables, xlabel, stem, title in plots:
-            figure = ModelAnalysisBase.plot_encoding_table(
-                tables,
-                xlabel=xlabel,
-                title=f"{title} ({config['regression']})",
-                vmax=vmax,
-            )
-            if figure is None:
-                continue
-            path = output_dir / f"encoding_{config['regression']}_{stem}.png"
-            figure.savefig(path, dpi=200, bbox_inches="tight", facecolor="white")
-            plt.close(figure)
-            print(f"[encoding] wrote {path}")
+        metric_plots = (
+            (
+                "mean_encoding_score",
+                "noise_ceiling_r",
+                None,
+                "Mean held-out Pearson r",
+                "",
+                raw_vmax,
+            ),
+            (
+                "mean_noise_normalized_r",
+                None,
+                1.0,
+                "Mean noise-normalized Pearson r",
+                "_noise_normalized",
+                normalized_vmax,
+            ),
+        )
+        for tables, xlabel, stem, title in modality_plots:
+            for (
+                value_column,
+                ceiling_column,
+                reference_value,
+                colorbar_label,
+                stem_suffix,
+                vmax,
+            ) in metric_plots:
+                if not any(value_column in table for table in tables.values()):
+                    continue
+                figure = ModelAnalysisBase.plot_encoding_table(
+                    tables,
+                    xlabel=xlabel,
+                    title=f"{title}{' (noise normalized)' if stem_suffix else ''} "
+                          f"({config['regression']})",
+                    value_column=value_column,
+                    ceiling_column=ceiling_column,
+                    reference_value=reference_value,
+                    colorbar_label=colorbar_label,
+                    vmax=vmax,
+                )
+                if figure is None:
+                    continue
+                path = output_dir / (
+                    f"encoding_{config['regression']}_{stem}{stem_suffix}.png"
+                )
+                figure.savefig(
+                    path, dpi=200, bbox_inches="tight", facecolor="white"
+                )
+                plt.close(figure)
+                print(f"[encoding] wrote {path}")
 
     run_manifest = output_dir / f"encoding_{config['regression']}_run.json"
     _atomic_json(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "config": config,
             "combined_csv": combined.name,
             "completed_models": completed_labels,
@@ -1041,22 +1202,51 @@ def _best(df):
     return (rho.idxmax(), float(rho.max())) if len(rho) else None
 
 
+def _metric_at(table, region, column):
+    if table is None or column not in table or region not in table.index:
+        return np.nan
+    return pd.to_numeric(
+        pd.Series([table.loc[region, column]]), errors="coerce"
+    ).iloc[0]
+
+
 def print_summary(results):
-    print("[rsa] best region per model:")
+    print("[rsa] best raw region per model (raw rho; noise-normalized rho):")
     for label in results["algonauts"]:
         parts = []
         best = _best(results["algonauts"][label])
         if best is not None:
-            parts.append(f"Algonauts {best[0]}={best[1]:.3f}")
+            normalized = _metric_at(
+                results["algonauts"][label],
+                best[0],
+                "noise_normalized_spearman_rho",
+            )
+            normalized_text = (
+                f", norm={normalized:.3f}" if np.isfinite(normalized) else ""
+            )
+            parts.append(
+                f"Algonauts {best[0]} raw={best[1]:.3f}{normalized_text}"
+            )
         for name, tables in results["triple_n"].items():
             best = _best(tables.get(label))
             if best is not None:
-                parts.append(f"Triple-N[{name}] {best[0]}={best[1]:.3f}")
+                normalized = _metric_at(
+                    tables.get(label),
+                    best[0],
+                    "noise_normalized_spearman_rho",
+                )
+                normalized_text = (
+                    f", norm={normalized:.3f}" if np.isfinite(normalized) else ""
+                )
+                parts.append(
+                    f"Triple-N[{name}] {best[0]} raw={best[1]:.3f}"
+                    f"{normalized_text}"
+                )
         print(f"    {label}: " + ("; ".join(parts) if parts else "(no comparable regions)"))
 
 
 def _best_encoding(table):
-    """(region, score, alpha) for the best finite held-out encoding score."""
+    """Best raw encoding subset with its normalized score and final alpha."""
     if table is None or not len(table):
         return None
     scores = pd.to_numeric(table["mean_encoding_score"], errors="coerce").dropna()
@@ -1066,7 +1256,8 @@ def _best_encoding(table):
     alpha = pd.to_numeric(
         pd.Series([table.loc[region, "best_alpha"]]), errors="coerce"
     ).iloc[0]
-    return region, float(scores.loc[region]), float(alpha)
+    normalized = _metric_at(table, region, "mean_noise_normalized_r")
+    return region, float(scores.loc[region]), float(normalized), float(alpha)
 
 
 def print_encoding_summary(results):
@@ -1084,9 +1275,15 @@ def print_encoding_summary(results):
                                   ("triple_n", "Triple-N")):
             best = _best_encoding(results.get(modality, {}).get(label))
             if best is not None:
-                region, score, alpha = best
+                region, score, normalized, alpha = best
                 alpha_text = f", final alpha={alpha:g}" if np.isfinite(alpha) else ""
-                parts.append(f"{display} {region}={score:.3f}{alpha_text}")
+                normalized_text = (
+                    f", norm={normalized:.3f}" if np.isfinite(normalized) else ""
+                )
+                parts.append(
+                    f"{display} {region} raw={score:.3f}{normalized_text}"
+                    f"{alpha_text}"
+                )
         print(f"    {label}: " + ("; ".join(parts) if parts else "(no scorable groups)"))
     for label, error in results.get("errors", {}).items():
         print(f"    {label}: ERROR — {error}")
@@ -1116,6 +1313,14 @@ def build_parser():
         help="analysis to run (default: rsa; encoding is opt-in because it is slow)",
     )
     parser.add_argument("--algonauts-dir", help="Algonauts root (default: $ALGONAUTS_DIR)")
+    parser.add_argument(
+        "--algonauts-noise-ceiling-dir",
+        default=None,
+        help=(
+            "official Algonauts test-data root containing per-vertex noise "
+            "ceilings (default: $ALGONAUTS_NOISE_CEILING_DIR or auto-detect)"
+        ),
+    )
     parser.add_argument("--triple-n-dir", help="Triple-N root (default: $TRIPLE_N_DIR)")
     parser.add_argument("--nsd-mat", default=str(DEFAULT_NSD_MAT),
                         help="path to nsd_expdesign.mat")
@@ -1127,12 +1332,21 @@ def build_parser():
         help="where CSVs and PNGs are written (default depends on --method)",
     )
     parser.add_argument("--subjects", type=int, nargs="+", default=list(range(1, 9)),
-                        help="Algonauts subjects to average ROI RDMs over")
+                        help="Algonauts subjects included in RSA and encoding")
     parser.add_argument("--rois", nargs="+", default=None,
                         help="restrict to these Algonauts ROIs (default: all)")
     parser.add_argument("--areas", nargs="+", default=None,
                         help="restrict the coarse-area segmentation to these Triple-N "
-                             "area labels (default: all); other segmentations unaffected")
+                             "area labels for RSA and encoding (default: all)")
+    parser.add_argument(
+        "--triple-n-min-reliability",
+        type=float,
+        default=DEFAULT_MIN_TRIPLE_N_RELIABILITY,
+        help=(
+            "minimum Spearman-Brown unit reliability for Triple-N encoding "
+            f"(default: {DEFAULT_MIN_TRIPLE_N_RELIABILITY:g})"
+        ),
+    )
     parser.add_argument(
         "--models",
         nargs="+",
@@ -1193,7 +1407,18 @@ def main(argv=None):
     triple_n_dir = _resolve_dir(args.triple_n_dir, "TRIPLE_N_DIR")
 
     shared_ids = shared_stimuli(args.nsd_mat)
-    algonauts = Algonauts(algonauts_dir, shared_ids)
+    noise_ceiling_dir = (
+        args.algonauts_noise_ceiling_dir
+        or os.environ.get("ALGONAUTS_NOISE_CEILING_DIR")
+    )
+    if noise_ceiling_dir is None:
+        algonauts = Algonauts(algonauts_dir, shared_ids)
+    else:
+        algonauts = Algonauts(
+            algonauts_dir,
+            shared_ids,
+            noise_ceiling_dir=noise_ceiling_dir,
+        )
     triple_n = TripleN(triple_n_dir)
 
     analyzers = discover_analyzers()
@@ -1270,6 +1495,7 @@ def main(argv=None):
             subjects=args.subjects,
             rois=args.rois,
             area_labels=args.areas,
+            triple_n_min_reliability=args.triple_n_min_reliability,
             regression=args.regression,
             alphas=args.alphas,
             outer_folds=args.outer_folds,

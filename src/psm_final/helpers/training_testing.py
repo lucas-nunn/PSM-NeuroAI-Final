@@ -119,9 +119,20 @@ def train_and_test(model, dataloader_train, dataloader_test, n_epochs, criterion
     criterion: a pytorch loss function instance
     optimizer: a pytorch optimizer instance
     device: 'cuda' or 'cpu'
+
+    Returns (history, val_history):
+      history      -- flat list of per-BATCH training losses
+                      (length == n_epochs * batches_per_epoch).
+      val_history  -- one dict per EPOCH:
+                      {'epoch', 'val_loss', 'val_accuracy_pct'}, from evaluating
+                      dataloader_test after each epoch. This is the same per-epoch
+                      test() the loop already ran; it used to be printed and
+                      discarded, and is now recorded so callers can log a
+                      validation curve over training.
     '''
 
     history = []
+    val_history = []
 
     # We loop over the whole training dataset n_epochs times
     for epoch in range(n_epochs):
@@ -147,7 +158,13 @@ def train_and_test(model, dataloader_train, dataloader_test, n_epochs, criterion
             if i%5==0:
               tqdm.write(f"\rBatch Loss: {batch_loss.item()}", end='')
 
-        # After each epoch, evaluate the model on the test set
+        # After each epoch, evaluate the model on the test set and RECORD it so the
+        # caller gets a per-epoch validation curve, not just the final number.
         test_loss, accuracy = test(model, dataloader_test, criterion, device)
+        val_history.append({
+            'epoch': epoch + 1,
+            'val_loss': test_loss,
+            'val_accuracy_pct': accuracy,
+        })
 
-    return history
+    return history, val_history

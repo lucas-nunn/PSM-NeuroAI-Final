@@ -45,7 +45,10 @@ class LatentHierarchyTests(unittest.TestCase):
         self.assertEqual(sum(sizes[:31]), 91_168)
 
     def test_top_resolution_cuts_have_expected_sizes(self):
-        for max_resolution, groups, dims in [(1, 2, 32), (4, 6, 1_056), (8, 14, 9_248)]:
+        # The cut is parameterised even though only res<=4 runs; pin the sizes across
+        # the range. res<=16 == 30 groups is Brain-Diffuser's low-level branch.
+        cuts = [(1, 2, 32), (4, 6, 1_056), (8, 14, 9_248), (16, 30, 74_784)]
+        for max_resolution, groups, dims in cuts:
             with self.subTest(max_resolution=max_resolution):
                 self.assertEqual(vdvae.n_top_groups(max_resolution), groups)
                 self.assertEqual(vdvae.embedding_dim(max_resolution), dims)
@@ -93,8 +96,10 @@ class DiscoverTests(unittest.TestCase):
         specs = VDVAEAnalysis.discover(triple_n_path="/nonexistent",
                                        checkpoints_root=str(_REPO_ROOT))
 
+        # A single arm at the default cut (the res<=4/8/16 layer sweep is off).
         self.assertEqual(len(specs), 1)
         self.assertIn("VDVAE", specs[0][0])
+        self.assertIn(f"res≤{vdvae.TOP_LATENT_RESOLUTION}", specs[0][0])
 
 
 @_needs_checkpoint

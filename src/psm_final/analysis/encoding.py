@@ -1,6 +1,7 @@
 """Cross-validated model-feature to neural-response encoding utilities."""
 
 from dataclasses import dataclass
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -9,11 +10,21 @@ from sklearn.model_selection import KFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from psm_final.analysis.correlating import noise_normalize_correlations
+
 
 DEFAULT_ALPHAS = tuple(np.logspace(-4, 4, 9))
+DEFAULT_MIN_TRIPLE_N_RELIABILITY = 0.4
 RESULT_COLUMNS = [
     "mean_encoding_score",
     "std_encoding_score",
+    "noise_ceiling_r",
+    "noise_ceiling_threshold",
+    "mean_noise_normalized_r",
+    "std_noise_normalized_r",
+    "mean_noise_normalized_r2",
+    "std_noise_normalized_r2",
+    "n_ceiling_targets",
     "best_alpha",
     "alpha_selection_stability",
     "outer_selected_alphas",
@@ -25,6 +36,7 @@ RESULT_COLUMNS = [
 @dataclass(frozen=True)
 class EncodingCVResult:
     outer_scores: np.ndarray
+    outer_target_scores: np.ndarray
     outer_selected_alphas: tuple[float, ...]
     best_alpha: float
     alpha_selection_stability: float
@@ -132,14 +144,22 @@ def _regressor(kind, alpha):
     return make_pipeline(StandardScaler(), estimator)
 
 
-def _fit_score(features, responses, train, test, regression, alpha):
+def _fit_correlations(features, responses, train, test, regression, alpha):
     model = _regressor(regression, alpha)
     response_scaler = StandardScaler()
     train_responses = response_scaler.fit_transform(responses[train])
     test_responses = response_scaler.transform(responses[test])
     model.fit(features[train], train_responses)
     predicted = model.predict(features[test])
-    return _mean_prediction_score(predicted, test_responses)
+    return prediction_correlations(predicted, test_responses)
+
+
+def _fit_score(features, responses, train, test, regression, alpha):
+    correlations = _fit_correlations(
+        features, responses, train, test, regression, alpha
+    )
+    finite = correlations[np.isfinite(correlations)]
+    return float(finite.mean()) if finite.size else np.nan
 
 
 def _alpha_scores(features, responses, splits, regression, alphas):
@@ -184,6 +204,7 @@ def nested_encoding_cv(
 
     outer_cv = KFold(n_splits=outer_folds, shuffle=True, random_state=seed)
     outer_scores = []
+    outer_target_scores = []
     selected_alphas = []
     for fold_index, (outer_train, outer_test) in enumerate(outer_cv.split(features)):
         inner_cv = KFold(
@@ -201,18 +222,22 @@ def nested_encoding_cv(
         )
         selected_alphas.append(best_alpha)
         if np.isfinite(best_alpha):
-            outer_scores.append(
-                _fit_score(
-                    features,
-                    responses,
-                    outer_train,
-                    outer_test,
-                    regression,
-                    best_alpha,
-                )
+            target_scores = _fit_correlations(
+                features,
+                responses,
+                outer_train,
+                outer_test,
+                regression,
+                best_alpha,
             )
+            finite = target_scores[np.isfinite(target_scores)]
+            outer_scores.append(float(finite.mean()) if finite.size else np.nan)
+            outer_target_scores.append(target_scores)
         else:
             outer_scores.append(np.nan)
+            outer_target_scores.append(
+                np.full(responses.shape[1], np.nan, dtype=float)
+            )
 
     final_cv = KFold(n_splits=inner_folds, shuffle=True, random_state=seed + 10_000)
     best_alpha, _ = _select_alpha(
@@ -230,6 +255,7 @@ def nested_encoding_cv(
     )
     return EncodingCVResult(
         outer_scores=np.asarray(outer_scores, dtype=float),
+        outer_target_scores=np.asarray(outer_target_scores, dtype=float),
         outer_selected_alphas=tuple(float(alpha) for alpha in selected_alphas),
         best_alpha=float(best_alpha),
         alpha_selection_stability=stability,
@@ -237,15 +263,80 @@ def nested_encoding_cv(
     )
 
 
-def _result_row(label, result):
+def _finite_fold_summary(values):
+    """Mean/std of per-fold means while preserving missing-fold semantics."""
+    values = np.asarray(values, dtype=float)
+    fold_means = []
+    for fold in values:
+        finite = fold[np.isfinite(fold)]
+        fold_means.append(float(finite.mean()) if finite.size else np.nan)
+    fold_means = np.asarray(fold_means, dtype=float)
+    finite = fold_means[np.isfinite(fold_means)]
+    if not finite.size:
+        return np.nan, np.nan
+    return float(finite.mean()), float(finite.std())
+
+
+def _noise_normalized_result(result, noise_ceiling, *, minimum_ceiling=0.0):
+    """Group summaries from per-target outer-fold scores and R² ceilings."""
+    minimum_ceiling = float(minimum_ceiling)
+    if not np.isfinite(minimum_ceiling) or minimum_ceiling < 0:
+        raise ValueError("minimum noise ceiling must be finite and non-negative")
+    empty = (
+        np.nan,
+        minimum_ceiling,
+        np.nan,
+        np.nan,
+        np.nan,
+        np.nan,
+        0,
+    )
+    if noise_ceiling is None:
+        return empty
+    ceiling = np.asarray(noise_ceiling, dtype=float).reshape(-1)
+    if ceiling.size != result.n_targets:
+        raise ValueError(
+            "noise ceiling must have one value per neural target; "
+            f"got {ceiling.size} for {result.n_targets} targets"
+        )
+    valid_ceiling = np.isfinite(ceiling) & (ceiling > 0)
+    if minimum_ceiling:
+        valid_ceiling &= ceiling >= minimum_ceiling
+    if not valid_ceiling.any():
+        return empty
+
+    ceiling_r = np.sqrt(np.clip(ceiling[valid_ceiling], 0.0, None))
+    signed, squared = noise_normalize_correlations(
+        result.outer_target_scores[:, valid_ceiling],
+        ceiling[None, valid_ceiling],
+        ceiling_squared=True,
+    )
+    signed_mean, signed_std = _finite_fold_summary(signed)
+    squared_mean, squared_std = _finite_fold_summary(squared)
+    return (
+        float(ceiling_r.mean()),
+        minimum_ceiling,
+        signed_mean,
+        signed_std,
+        squared_mean,
+        squared_std,
+        int(valid_ceiling.sum()),
+    )
+
+
+def _result_row(label, result, noise_ceiling=None, *, minimum_ceiling=0.0):
     finite_scores = result.outer_scores[np.isfinite(result.outer_scores)]
     mean_score = float(finite_scores.mean()) if finite_scores.size else np.nan
     std_score = float(finite_scores.std()) if finite_scores.size else np.nan
+    normalized = _noise_normalized_result(
+        result, noise_ceiling, minimum_ceiling=minimum_ceiling
+    )
     selected = ",".join(f"{alpha:g}" for alpha in result.outer_selected_alphas)
     return (
         label,
         mean_score,
         std_score,
+        *normalized,
         result.best_alpha,
         result.alpha_selection_stability,
         selected,
@@ -286,19 +377,47 @@ def _encoding_algonauts_from_prepared(
         subject: algonauts.response_matrix(subject, indices=nsd_ids)
         for subject in subjects
     }
+    ceiling_loader = getattr(algonauts, "noise_ceiling", None)
+    warned_missing_ceiling = False
     rows = []
     for group_index, roi in enumerate(rois, start=1):
         if progress is not None:
             progress("algonauts", roi, group_index, len(rois))
         roi_responses = []
+        roi_ceilings = []
         for subject in subjects:
             left, right = responses[subject]
             left_mask, right_mask = algonauts.roi_mask(roi, subject)
-            matrix = np.concatenate(
-                (left[:, left_mask], right[:, right_mask]), axis=1
-            )
+            left_roi = left[:, left_mask]
+            right_roi = right[:, right_mask]
+            matrix = np.concatenate((left_roi, right_roi), axis=1)
             if matrix.shape[1]:
                 roi_responses.append(matrix)
+                try:
+                    if not callable(ceiling_loader):
+                        raise FileNotFoundError("dataset exposes no ceiling loader")
+                    left_ceiling, right_ceiling = ceiling_loader(subject, roi=roi)
+                    subject_ceiling = np.concatenate(
+                        (
+                            np.asarray(left_ceiling, dtype=float).reshape(-1),
+                            np.asarray(right_ceiling, dtype=float).reshape(-1),
+                        )
+                    )
+                    if subject_ceiling.size != matrix.shape[1]:
+                        raise ValueError(
+                            "Algonauts ceiling/response target counts differ for "
+                            f"subject {subject}, ROI {roi}: "
+                            f"{subject_ceiling.size} != {matrix.shape[1]}"
+                        )
+                except (FileNotFoundError, OSError) as exc:
+                    subject_ceiling = np.full(matrix.shape[1], np.nan)
+                    if not warned_missing_ceiling:
+                        warnings.warn(
+                            "Algonauts noise ceilings unavailable or invalid; "
+                            f"normalized encoding metrics will be NaN ({exc})"
+                        )
+                        warned_missing_ceiling = True
+                roi_ceilings.append(subject_ceiling)
         if not roi_responses:
             continue
         result = nested_encoding_cv(
@@ -310,7 +429,9 @@ def _encoding_algonauts_from_prepared(
             inner_folds=inner_folds,
             seed=seed,
         )
-        rows.append(_result_row(roi, result))
+        rows.append(
+            _result_row(roi, result, np.concatenate(roi_ceilings))
+        )
     return _result_frame(rows, "roi")
 
 
@@ -325,32 +446,62 @@ def _encoding_triple_n_from_prepared(
     outer_folds,
     inner_folds,
     seed,
+    min_reliability,
     progress=None,
 ):
+    min_reliability = float(min_reliability)
+    if not np.isfinite(min_reliability) or not 0 <= min_reliability <= 1:
+        raise ValueError("Triple-N minimum reliability must be between 0 and 1")
     if area_labels is None:
         area_labels = sorted(triple_n.units["area_label"].unique())
     area_labels = list(area_labels)
+
     rows = []
     for group_index, label in enumerate(area_labels, start=1):
         if progress is not None:
             progress("triple_n", label, group_index, len(area_labels))
         try:
-            area_responses = triple_n.response_matrix(
-                area_label=label,
-                indices=stim_index,
+            group_responses = triple_n.response_matrix(
+                indices=stim_index, area_label=label
             )
         except ValueError:
             continue
+        noise_ceiling = None
+        metadata_loader = getattr(triple_n, "unit_metadata", None)
+        if callable(metadata_loader):
+            metadata = metadata_loader(area_label=label)
+            if "reliability_best" in metadata:
+                noise_ceiling = metadata["reliability_best"].to_numpy(dtype=float)
+                if noise_ceiling.size != group_responses.shape[1]:
+                    raise ValueError(
+                        "Triple-N response/metadata target counts differ for "
+                        f"{label}: {group_responses.shape[1]} != {noise_ceiling.size}"
+                    )
+                reliable = (
+                    np.isfinite(noise_ceiling)
+                    & (noise_ceiling >= float(min_reliability))
+                )
+                if reliable.sum() < 2:
+                    continue
+                group_responses = group_responses[:, reliable]
+                noise_ceiling = noise_ceiling[reliable]
         result = nested_encoding_cv(
             features,
-            area_responses,
+            group_responses,
             regression=regression,
             alphas=alphas,
             outer_folds=outer_folds,
             inner_folds=inner_folds,
             seed=seed,
         )
-        rows.append(_result_row(label, result))
+        rows.append(
+            _result_row(
+                label,
+                result,
+                noise_ceiling,
+                minimum_ceiling=min_reliability,
+            )
+        )
     return _result_frame(rows, "area_label")
 
 
@@ -400,6 +551,7 @@ def encoding_triple_n(
     outer_folds=5,
     inner_folds=3,
     seed=42,
+    min_reliability=DEFAULT_MIN_TRIPLE_N_RELIABILITY,
     progress=None,
 ):
     _subjects, _nsd_ids, stim_index, features = _prepare(
@@ -415,6 +567,7 @@ def encoding_triple_n(
         outer_folds=outer_folds,
         inner_folds=inner_folds,
         seed=seed,
+        min_reliability=min_reliability,
         progress=progress,
     )
 
@@ -433,6 +586,7 @@ def encoding_tables(
     outer_folds=5,
     inner_folds=3,
     seed=42,
+    triple_n_min_reliability=DEFAULT_MIN_TRIPLE_N_RELIABILITY,
     progress=None,
 ):
     """Compute both encoding tables while extracting model features only once."""
@@ -461,6 +615,7 @@ def encoding_tables(
             stim_index,
             features,
             area_labels=area_labels,
+            min_reliability=triple_n_min_reliability,
             progress=progress,
             **common,
         ),
