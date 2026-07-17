@@ -5,11 +5,15 @@ from importlib import import_module
 __all__ = [
     "BetaVAE",
     "COCODataset",
+    "EncodingModel",
+    "load_vdvae",
 ]
 
 _EXPORTS = {
     "BetaVAE": ".beta_vae",
     "COCODataset": ".beta_vae",
+    "EncodingModel": ".encoding",
+    "load_vdvae": ".vdvae",
 }
 
 

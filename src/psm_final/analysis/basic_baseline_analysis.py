@@ -14,15 +14,28 @@ class BasicBaselineAnalysis(ModelAnalysisBase):
 
     @classmethod
     def discover(cls, *, triple_n_path, checkpoints_root, device=None):
+        def pixel_factory():
+            return cls(triple_n_path=triple_n_path, kind="pixel")
+
+        # Flattened full-resolution pixels can materialize several GB once the
+        # encoding solver promotes features to float64. Keep the baseline available
+        # through an explicit --models Pixel selection, but out of default batches.
+        pixel_factory.encoding_default = False
+
+        def pca_factory():
+            return cls(
+                triple_n_path=triple_n_path,
+                kind="pca",
+                n_components=cls.DEFAULT_PCA_COMPONENTS,
+            )
+
+        # The current PCA baseline fits its transform before CV splits exist.
+        pca_factory.encoding_cv_safe = False
         return [
-            ("Pixel", lambda: cls(triple_n_path=triple_n_path, kind="pixel")),
+            ("Pixel", pixel_factory),
             (
                 f"PCA {cls.DEFAULT_PCA_COMPONENTS}",
-                lambda: cls(
-                    triple_n_path=triple_n_path,
-                    kind="pca",
-                    n_components=cls.DEFAULT_PCA_COMPONENTS,
-                ),
+                pca_factory,
             ),
         ]
 
@@ -30,6 +43,9 @@ class BasicBaselineAnalysis(ModelAnalysisBase):
                  batch_size=DEFAULT_BATCH_SIZE):
         super().__init__(triple_n_path)
         self.kind = kind
+        # PCA is fitted from ``self.images`` before encoding CV splits are created,
+        # so including it would leak held-out stimuli into the feature transform.
+        self.encoding_cv_safe = kind != "pca"
         self.n_components = n_components
         self.batch_size = batch_size
         self._scaler = None

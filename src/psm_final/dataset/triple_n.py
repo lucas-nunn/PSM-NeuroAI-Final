@@ -48,6 +48,18 @@ class TripleN():
             selectivity = np.stack([session["F_SI"].ravel(), session["B_SI"].ravel(), session["O_SI"].ravel()])
             preference = PREFERENCE[np.argmax(selectivity[:, in_area], axis=0)]
 
+            # BombCell quality classification from the processed release:
+            # 1=single unit, 2=multi-unit activity, 3=non-somatic. This is the
+            # ``unit_type`` segmentation already used by RSA; it is not the
+            # temporal-response clustering shown elsewhere in the paper.
+            unit_type = np.asarray(session["UnitType"]).ravel()[in_area].astype(int)
+            reliability_best = np.asarray(
+                session.get(
+                    "reliability_best",
+                    np.full((1, response_best.shape[0]), np.nan),
+                )
+            ).ravel()[in_area].astype(float)
+
             resp_blocks.append(resp)
             meta_blocks.append(pd.DataFrame({
                 "session": row.SesIdx,                                  # SesIdx (1..90)
@@ -58,6 +70,11 @@ class TripleN():
                 "region": row.Area,                                     # IT / EVC
                 "macaque": f"M{int(area_subject.get(row.RoiIndex))}",   # M1..M5
                 "preference": preference,                               # this unit's tuning: F / B / O
+                "unit_type": unit_type,                                 # BombCell quality class: 1 / 2 / 3
+                # Spearman-Brown-corrected repeat reliability. It is in R²-like
+                # explainable-variance units, so sqrt(reliability_best) is the
+                # attainable Pearson-r ceiling for encoding evaluation.
+                "reliability_best": reliability_best,
                 "depth": pos[in_area],                                  # unit depth (microns)
             }))
 
@@ -97,7 +114,50 @@ class TripleN():
         `indices` (1-based stim_index, 1..1072) to select/reorder stimuli. Returns the
         condensed upper triangle, matching Algonauts.compute_rdm.
         """
-        # --- select units ---
+        patterns = self.response_matrix(
+            macaque=macaque,
+            area=area,
+            category=category,
+            region=region,
+            preference=preference,
+            indices=indices,
+            **filters,
+        )
+        return correlation_rdm(patterns)
+    
+    def response_matrix(self, macaque=None, area=None, category=None,
+                        region=None, preference=None, indices=None, **filters):
+        """Stimulus x unit response matrix for a selected set of units (no RDM)."""
+        unit_mask = self._unit_mask(
+            macaque=macaque,
+            area=area,
+            category=category,
+            region=region,
+            preference=preference,
+            **filters,
+        )
+        if unit_mask.sum() < 2:
+            raise ValueError(f"need >=2 units, matched {int(unit_mask.sum())}")
+
+        stim_cols = np.arange(1000) if indices is None else np.asarray(indices) - 1
+        return self.responses[unit_mask][:, stim_cols].T
+
+    def unit_metadata(self, macaque=None, area=None, category=None,
+                      region=None, preference=None, **filters):
+        """Metadata rows aligned with columns returned by :meth:`response_matrix`."""
+        unit_mask = self._unit_mask(
+            macaque=macaque,
+            area=area,
+            category=category,
+            region=region,
+            preference=preference,
+            **filters,
+        )
+        return self.units.loc[unit_mask].reset_index(drop=True).copy()
+
+    def _unit_mask(self, macaque=None, area=None, category=None,
+                   region=None, preference=None, **filters):
+        """Boolean mask shared by response and metadata selection."""
         criteria = {"macaque": macaque, "area_index": area, "category": category,
                     "region": region, "preference": preference, **filters}
         unit_mask = np.ones(len(self.units), dtype=bool)
@@ -108,12 +168,4 @@ class TripleN():
                 unit_mask &= self.units[col].isin(list(value)).to_numpy()
             else:
                 unit_mask &= (self.units[col] == value).to_numpy()
-        if unit_mask.sum() < 2:
-            raise ValueError(f"need >=2 units for an RDM, matched {int(unit_mask.sum())}")
-
-        # --- select stimuli (default: the 1000 NSD scenes; localizers are 1001..1072) ---
-        stim_cols = np.arange(1000) if indices is None else np.asarray(indices) - 1
-
-        # --- stimulus x stimulus RDM (transpose: stimuli are items, units are features) ---
-        patterns = self.responses[unit_mask][:, stim_cols].T
-        return correlation_rdm(patterns)
+        return unit_mask
