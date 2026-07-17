@@ -37,6 +37,8 @@ from psm_final.analysis.vdvae_analysis import VDVAEAnalysis
 from psm_final.models.vdvae import (
     TOP_LATENT_RESOLUTION,
     checkpoint_path,
+    embedding_dim,
+    n_top_groups,
     preprocess,
 )
 
@@ -89,6 +91,21 @@ def reconstruct_sd_vae(analyzer, images):
     return orig, recon
 
 
+def _vdvae_originals(images):
+    """Originals at the SAME 64px framing the encoder saw (resize short edge + crop)."""
+    disp = transforms.Compose([
+        transforms.Resize(64, interpolation=Image.BICUBIC),
+        transforms.CenterCrop(64),
+        transforms.PILToTensor(),
+    ])
+    return torch.stack([disp(im).float().div(255.0) for im in images])
+
+
+def _vdvae_decode(recon_u8):
+    """VDVAE uint8 NHWC decoder output -> float [0,1] NCHW."""
+    return torch.from_numpy(recon_u8).float().div(255.0).permute(0, 3, 1, 2)
+
+
 @torch.no_grad()
 def reconstruct_vdvae(analyzer, images):
     """Return (originals, reconstructions) in [0, 1], NCHW, at 64x64.
@@ -101,16 +118,34 @@ def reconstruct_vdvae(analyzer, images):
     stats = analyzer.model.forward_get_latents(batch, deterministic=True)
     latents = [s["z"] for s in stats]                                   # posterior means (all groups)
     recon_u8 = analyzer.model.forward_samples_set_latents(batch.shape[0], latents)  # (N,64,64,3) uint8
-    recon = torch.from_numpy(recon_u8).float().div(255.0).permute(0, 3, 1, 2)       # (N,3,64,64) [0,1]
+    return _vdvae_originals(images), _vdvae_decode(recon_u8)
 
-    # Originals at the SAME 64px framing the encoder saw (resize short edge + centre crop).
-    disp = transforms.Compose([
-        transforms.Resize(64, interpolation=Image.BICUBIC),
-        transforms.CenterCrop(64),
-        transforms.PILToTensor(),
-    ])
-    orig = torch.stack([disp(im).float().div(255.0) for im in images])
-    return orig, recon
+
+@torch.no_grad()
+def reconstruct_vdvae_top(analyzer, images, max_resolution=TOP_LATENT_RESOLUTION,
+                          temperature=1e-6):
+    """Reconstruct from ONLY the res<=max_resolution latent groups -- the exact
+    embedding the encoding/RSA arm uses -- with the deeper groups filled from the prior.
+
+    Keeps the posterior means of the top ``k`` groups (res<=max_resolution) and passes
+    only those to ``forward_samples_set_latents``; ``forward_manual_latents`` pads the
+    remaining ~69 groups with ``lvs=None`` (itertools.zip_longest), so they are drawn
+    from the prior. ``temperature`` scales the prior std for those groups:
+    ``temperature -> 0`` takes the prior MEAN (deterministic -- the single most likely
+    completion given the coarse latents), so the image shows what the 1,056-d embedding
+    pins down and nothing it doesn't.
+    """
+    dev = analyzer.device
+    batch = torch.cat([preprocess(im, device=dev) for im in images], dim=0)
+    stats = analyzer.model.forward_get_latents(batch, deterministic=True)
+    k = n_top_groups(max_resolution)
+    kept = [s["z"] for s in stats[:k]]                                  # coarse posterior means only
+    recon_u8 = analyzer.model.forward_samples_set_latents(
+        batch.shape[0], kept, t=temperature)
+    print(f"[VDVAE] res<={max_resolution}: kept {k} groups "
+          f"({embedding_dim(max_resolution)} dims), deeper groups from prior "
+          f"(t={temperature:g})")
+    return _vdvae_originals(images), _vdvae_decode(recon_u8)
 
 
 def save_grid(orig, recon, path, n):
@@ -129,27 +164,46 @@ def main():
     ap.add_argument("--n", type=int, default=8, help="images in the grid (default 8)")
     ap.add_argument("--out-dir", default=str(REPO / "figures"))
     ap.add_argument("--device", default=None)
+    ap.add_argument(
+        "--which", default="all",
+        choices=("all", "sd", "vdvae", "vdvae-top"),
+        help="which reconstruction(s) to generate (default: all)",
+    )
+    ap.add_argument(
+        "--top-temperature", type=float, default=1e-6,
+        help="prior temperature for the deeper groups in the res<=4 reconstruction; "
+             "->0 is the deterministic prior-mean completion (default 1e-6)",
+    )
     args = ap.parse_args()
 
     triple_n_dir = resolve_triple_n_dir(args.triple_n_dir)
     out_dir = Path(args.out_dir)
     images = load_stimuli(triple_n_dir, args.n)
+    want = {"sd", "vdvae", "vdvae-top"} if args.which == "all" else {args.which}
 
-    print("[SD-VAE] loading stabilityai/sd-vae-ft-mse ...")
-    sd = AutoKL(triple_n_path=triple_n_dir, device=args.device)
-    orig, recon = reconstruct_sd_vae(sd, images)
-    save_grid(orig, recon, out_dir / "recon_sd_vae.png", args.n)
-    del sd
-    torch.cuda.empty_cache()
+    if "sd" in want:
+        print("[SD-VAE] loading stabilityai/sd-vae-ft-mse ...")
+        sd = AutoKL(triple_n_path=triple_n_dir, device=args.device)
+        orig, recon = reconstruct_sd_vae(sd, images)
+        save_grid(orig, recon, out_dir / "recon_sd_vae.png", args.n)
+        del sd
+        torch.cuda.empty_cache()
 
-    print(f"[VDVAE] loading checkpoint (res<={TOP_LATENT_RESOLUTION} arm, full-hierarchy decode) ...")
-    vd = VDVAEAnalysis(
-        triple_n_path=triple_n_dir,
-        model_path=str(checkpoint_path(REPO)),
-        device=args.device,
-    )
-    orig, recon = reconstruct_vdvae(vd, images)
-    save_grid(orig, recon, out_dir / "recon_vdvae.png", args.n)
+    if want & {"vdvae", "vdvae-top"}:
+        print("[VDVAE] loading imagenet64 checkpoint ...")
+        vd = VDVAEAnalysis(
+            triple_n_path=triple_n_dir,
+            model_path=str(checkpoint_path(REPO)),
+            device=args.device,
+        )
+        if "vdvae" in want:
+            orig, recon = reconstruct_vdvae(vd, images)
+            save_grid(orig, recon, out_dir / "recon_vdvae.png", args.n)
+        if "vdvae-top" in want:
+            orig, recon = reconstruct_vdvae_top(
+                vd, images, max_resolution=TOP_LATENT_RESOLUTION,
+                temperature=args.top_temperature)
+            save_grid(orig, recon, out_dir / "recon_vdvae_res4.png", args.n)
 
 
 if __name__ == "__main__":
